@@ -14,8 +14,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is alive!")
 
+    def do_HEAD(self):
+        """Handle HEAD requests from Render's health checker"""
+        self.send_response(200)
+        self.end_headers()
+
 def run_health_check():
-    # Render provides a PORT environment variable
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
@@ -513,3 +517,4 @@ async def on_message(message):
         await message.channel.send("Tracked words: " + ", ".join(words))
 
 bot.run(hUIPJ21boH)
+
