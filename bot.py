@@ -338,10 +338,13 @@ def get_leaderboard(guild, limit=10):
 # ---------------- Slash commands ----------------
 @tree.command(name="top_swearer", description="Show the leaderboard of top swearers")
 async def top_swearer(interaction: discord.Interaction):
+    # Defer because calculating totals across all users in DB can be slow
+    await interaction.response.defer()
+    
     leaderboard = get_leaderboard(interaction.guild)
     
     if not leaderboard:
-        await interaction.response.send_message("No swears recorded yet.")
+        await interaction.followup.send("No swears recorded yet.")
         return
 
     embed = discord.Embed(
@@ -350,7 +353,7 @@ async def top_swearer(interaction: discord.Interaction):
         color=discord.Color.gold()
     )
     embed.set_footer(text="KALMA MGA GAGO")
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 @tree.command(name="userswearcount", description="Show a user's swear breakdown and overall count")
 @app_commands.describe(user="User to lookup (defaults to you)")
@@ -381,31 +384,43 @@ async def testscan(interaction: discord.Interaction, text: str):
 @tree.command(name="addswear", description="Add a swear word to tracking")
 @app_commands.describe(word="Word to add")
 async def addswear(interaction: discord.Interaction, word: str):
+    # 1. Immediately defer to prevent the 3-second timeout error
+    await interaction.response.defer(ephemeral=True)
+
     if not has_permission(interaction.user):
-        await interaction.response.send_message("❌ You do not have the required role to manage swear words.", ephemeral=True)
+        await interaction.followup.send("❌ You do not have the required role to manage swear words.")
         return
 
     word_clean = word.lower().strip()
+    
+    # Check for duplicates using the cached list or DB
     if word_clean in get_swear_words():
-        await interaction.response.send_message(f"⚠️ **{word_clean}** is already in the list. Duplicate ignored.", ephemeral=True)
+        await interaction.followup.send(f"⚠️ **{word_clean}** is already in the list. Duplicate ignored.")
         return
 
+    # Perform the database write
     if add_swear_word(word_clean):
-        await interaction.response.send_message(f"✅ Added swear word: **{word_clean}**")
-
+        # 2. Use followup.send instead of response.send_message
+        await interaction.followup.send(f"✅ Added swear word: **{word_clean}**")
+    else:
+        await interaction.followup.send(f"❌ Failed to add **{word_clean}**.")
+        
 @tree.command(name="remswear", description="Remove a swear word from tracking")
 @app_commands.describe(word="Word to remove")
 async def remswear(interaction: discord.Interaction, word: str):
+    # Defer immediately to avoid "Unknown Interaction" 404 error
+    await interaction.response.defer(ephemeral=True)
+
     if not has_permission(interaction.user):
-        await interaction.response.send_message("❌ You do not have the required role to manage swear words.", ephemeral=True)
+        await interaction.followup.send("❌ You do not have the required role to manage swear words.")
         return
 
     word_clean = word.lower().strip()
     if remove_swear_word(word_clean):
-        await interaction.response.send_message(f"🗑️ Removed swear word: **{word_clean}**")
+        await interaction.followup.send(f"🗑️ Removed swear word: **{word_clean}**")
     else:
-        await interaction.response.send_message(f"❓ **{word_clean}** was not found in the list.")
-
+        await interaction.followup.send(f"❓ **{word_clean}** was not found in the list.")
+        
 @tree.command(name="listswears", description="List currently tracked swear words")
 async def listswears(interaction: discord.Interaction):
     words = get_swear_words()
@@ -517,5 +532,6 @@ async def on_message(message):
         await message.channel.send("Tracked words: " + ", ".join(words))
 
 bot.run(hUIPJ21boH)
+
 
 
