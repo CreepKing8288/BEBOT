@@ -236,7 +236,7 @@ def scan_text(content: str):
         pattern = "".join([re.escape(char) + "+" for char in w])
         
         # Use \b to ensure it's still treated as a word (won't catch 'refucking' unless intended)
-        matches = re.findall(r"\b" + pattern + r"\b", s, flags=re.IGNORECASE)
+        matches = re.findall(pattern, s, flags=re.IGNORECASE)
         
         c = len(matches)
         if c > 0:
@@ -517,4 +517,5 @@ async def on_message(message):
         await message.channel.send("Tracked words: " + ", ".join(words))
 
 bot.run(hUIPJ21boH)
+
 
