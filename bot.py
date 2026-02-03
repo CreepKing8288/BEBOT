@@ -40,6 +40,8 @@ tree = app_commands.CommandTree(bot)
 
 ANNOUNCE_CHANNEL_ID = 1458464867366342809
 
+REPORT_CHANNEL_ID = 1468224442089079071
+
 # --- Swear tracking config ---
 # MongoDB connection (set MONGODB_URI environment variable)
 MONGO_URI = os.getenv("MONGODB_URI")
@@ -197,7 +199,7 @@ async def on_ready():
         names = [c.name for c in synced]
         print(f"Synced {len(synced)} slash command(s): {', '.join(names) if names else 'none'}")
         # Debug: check presence of important commands
-        expected = ["top_swearer", "userswearcount", "addswear", "remswear", "listswears", "testscan"]
+        expected = ["top_swearer", "userswearcount", "addswear", "remswear", "listswears", "testscan", "report"]
         for cmd in expected:
             print(f"/{cmd} registered: {'yes' if cmd in names else 'no'}")
     except Exception as e:
@@ -336,6 +338,47 @@ def get_leaderboard(guild, limit=10):
 
 
 # ---------------- Slash commands ----------------
+@tree.command(name="report", description="Report a user with evidence")
+@discord.app_commands.describe(
+    suspect="The user you are reporting",
+    evidence="Image evidence for the report",
+    description="Detailed description of the incident"
+)
+async def report(
+    interaction: discord.Interaction, 
+    suspect: discord.Member, 
+    evidence: discord.Attachment, 
+    description: str
+):
+    # Check if the attachment is an image
+    if not evidence.content_type or not evidence.content_type.startswith("image/"):
+        await interaction.response.send_message("The evidence must be an image file.", ephemeral=True)
+        return
+
+    report_channel = bot.get_channel(REPORT_CHANNEL_ID)
+    if not report_channel:
+        await interaction.response.send_message("Report channel not found. Please contact an admin.", ephemeral=True)
+        return
+
+    # Create the Embed
+    embed = discord.Embed(
+        title="🚨 New User Report",
+        color=0xFF0000, # Red color for alerts
+        timestamp=interaction.created_at
+    )
+    
+    embed.add_field(name="Reporter", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Suspect", value=suspect.mention, inline=True)
+    embed.add_field(name="Description", value=description, inline=False)
+    embed.add_field(name="Timeline", value=f"<t:{int(interaction.created_at.timestamp())}:F>", inline=False)
+    
+    # Attach the evidence image to the embed
+    embed.set_image(url=evidence.url)
+    
+    await report_channel.send(embed=embed)
+    await interaction.response.send_message("Your report has been submitted successfully.", ephemeral=True)
+
+
 @tree.command(name="top_swearer", description="Show the leaderboard of top swearers")
 async def top_swearer(interaction: discord.Interaction):
     leaderboard = get_leaderboard(interaction.guild)
