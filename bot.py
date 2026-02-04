@@ -338,10 +338,6 @@ def get_leaderboard(guild, limit=10):
 
 
 # ---------------- Slash commands ----------------
-@tree.command(name="dashboard", description="Get the link to the dashboard")
-async def dashboard_link(interaction: discord.Interaction):
-    await interaction.response.send_message("🌐 View the Live Dashboard here: https://bebot-zvbk.onrender.com")
-
 @tree.command(name="report", description="Report a user with evidence")
 @discord.app_commands.describe(
     suspect="The user you are reporting",
