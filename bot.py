@@ -20,7 +20,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 def run_health_check():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 5000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
@@ -73,6 +73,10 @@ AUTHORIZED_ROLES = [
     1458456130195034251, 
     1458455703638376469
 ]
+
+def is_owner(user_id: int):
+    """Checks if the User ID is one of the two authorized owners."""
+    return user_id in [1394914695600934932, 912385288129622147]
 
 def has_permission(member: discord.Member):
     """Checks if the member has any of the authorized roles."""
@@ -186,6 +190,25 @@ def remove_swear_word(word: str):
         get_swear_words()
         return True
 
+def clear_user_data(user: discord.User, word: str = None):
+    """Clears all counts or a specific word for a user in DB or JSON."""
+    uid = str(user.id)
+    if coll is not None:
+        if word:
+            coll.update_one({"_id": uid}, {"$unset": {f"counts.{word.lower()}": ""}})
+        else:
+            coll.delete_one({"_id": uid})
+    else:
+        data = load_data()
+        if uid in data:
+            if word:
+                word = word.lower()
+                if word in data[uid]:
+                    del data[uid][word]
+            else:
+                del data[uid]
+            save_data(data)
+
 # Initialize at startup
 init_swear_words()
 
@@ -199,7 +222,7 @@ async def on_ready():
         names = [c.name for c in synced]
         print(f"Synced {len(synced)} slash command(s): {', '.join(names) if names else 'none'}")
         # Debug: check presence of important commands
-        expected = ["top_swearer", "userswearcount", "addswear", "remswear", "listswears", "testscan", "report"]
+        expected = ["top_swearer", "userswearcount", "addswear", "remswear", "listswears", "clearcount", "testscan", "report"]
         for cmd in expected:
             print(f"/{cmd} registered: {'yes' if cmd in names else 'no'}")
     except Exception as e:
@@ -457,6 +480,33 @@ async def listswears(interaction: discord.Interaction):
         return
     await interaction.response.send_message("Tracked words: " + ", ".join(words))
 
+@tree.command(name="clearcount", description="Reset swear counts for a user (Owner Only)")
+@app_commands.describe(
+    user="The user to clear counts for",
+    word="Specific word to clear (leave empty to clear ALL counts)"
+)
+async def clearcount(interaction: discord.Interaction, user: discord.Member, word: str = None):
+    # Strict ID check
+    if not is_owner(interaction.user.id):
+        await interaction.response.send_message("❌ Access Denied: Only specific bot owners can use this command.", ephemeral=True)
+        return
+
+    word_clean = word.lower().strip() if word else None
+    
+    clear_user_data(user, word_clean)
+    
+    if word_clean:
+        await interaction.response.send_message(
+            f"🗑️ Cleared count for **{word_clean}** from {user.mention}.", 
+            ephemeral=False
+        )
+    else:
+        await interaction.response.send_message(
+            f"🧹 Cleared **all** swear records for {user.mention}.", 
+            ephemeral=False
+        )
+        
+
 # ---------------- Message-based commands & scanning ----------------
 @bot.event
 async def on_message(message):
@@ -485,7 +535,7 @@ async def on_message(message):
             await message.channel.send("No swears recorded yet.")
             return
             
-        response = "**🏆 Swear Word Leaderboard**\n" + "\n".join(leaderboard)
+        response = "**Users Swearing Board**\n" + "\n".join(leaderboard)
         await message.channel.send(response)
     elif message.content.strip().lower().startswith("/userswearcount"):
         parts = message.content.strip().split()
