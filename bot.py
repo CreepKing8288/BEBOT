@@ -2,6 +2,7 @@ import discord
 import os
 import json
 import re
+import time
 from collections import Counter
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -73,6 +74,37 @@ AUTHORIZED_ROLES = [
     1458456130195034251, 
     1458455703638376469
 ]
+
+RULES_DATA = {
+    "ARTICLE 1: Core Conduct": {
+        "1.1 Respect Boundaries": "No harassment, unwanted DMs, or 'stalking' behaviors.",
+        "1.2 Zero Tolerance": "Instant bans for hate speech, slurs, or discriminatory content.",
+        "1.3 No Drama": "Keep personal arguments in DMs; do not disrupt public channels.",
+        "1.4 Discord TOS": "All members/user must follow Discord Terms of Service"
+    },
+    "ARTICLE 2: Communication Etiquette": {
+        "2.1 Channel Clarity": "Use channels for their intended purpose (e.g., memes in #memes).",
+        "2.2 Ping Policy": "Do not use @everyone or @here without a valid reason or staff permission.",
+        "2.3 VC Etiquette": "No ear-rape, screaming, or excessive noise. Use Push-to-Talk if needed.",
+        "2.4 Advertising": "No Unauthorized Advertising: Do not post server invites or social media links without staff approval."
+    },
+    "ARTICLE 3: Safety & Integrity": {
+        "3.1 Age Limit": "Users must be 13+ (or 18+ for adult-designated servers).",
+        "3.2 NSFW Content": "Forbidden in public areas; only allowed in age-restricted channels.",
+        "3.3 Anti-Scam": "Sharing 'Free Nitro' links or suspicious downloads results in an instant ban.",
+        "3.4 No Ban Evasion": "Using alternate accounts to bypass bans or timeouts is prohibited.",
+        "3.5 Consent First": "Never share a friend's real name, location, or photo without permission.",
+        "3.6 Common Sense": "Just because something isn't explicitly written doesn't mean it’s allowed."
+    },
+    "ARTICLE 4: Admin Authority": {
+        "4.1 Staff Discretion": "Moderators have the final say on behavior not explicitly listed.",
+        "4.2 Conflict of Interest": "Staff must recuse themselves from cases involving close friends.",
+        "4.3 Evidence-Based": "All bans and kicks must be backed by logged evidence.",
+        "4.4 Internal Privacy": "Staff-room discussions are strictly confidential.",
+        "4.5 Transparency": "Staff must clearly cite the rule violated when taking action.",
+        "4.6 Power Tripping": "Avoid using staff-only permissions for jokes or to win arguments."
+    }
+}
 
 def is_owner(user_id: int):
     """Checks if the User ID is one of the two authorized owners."""
@@ -222,7 +254,7 @@ async def on_ready():
         names = [c.name for c in synced]
         print(f"Synced {len(synced)} slash command(s): {', '.join(names) if names else 'none'}")
         # Debug: check presence of important commands
-        expected = ["top_swearer", "userswearcount", "addswear", "remswear", "listswears", "clearcount", "testscan", "report"]
+        expected = ["top_swearer", "userswearcount", "addswear", "remswear", "listswears", "clearcount", "testscan", "report", "rulewarning", "removewarning", "clearwarning", "warnlist"]
         for cmd in expected:
             print(f"/{cmd} registered: {'yes' if cmd in names else 'no'}")
     except Exception as e:
@@ -505,7 +537,152 @@ async def clearcount(interaction: discord.Interaction, user: discord.Member, wor
             f"🧹 Cleared **all** swear records for {user.mention}.", 
             ephemeral=False
         )
+
+# --- Rule Warning Autocomplete Helpers ---
+async def article_autocomplete(interaction: discord.Interaction, current: str):
+    return [
+        app_commands.Choice(name=art, value=art)
+        for art in RULES_DATA.keys() if current.lower() in art.lower()
+    ][:25] # Discord limit is 25 choices
+
+async def section_autocomplete(interaction: discord.Interaction, current: str):
+    # This gets the current value of the 'article' field in the command
+    article = interaction.namespace.article
+    if not article or article not in RULES_DATA:
+        return []
+    return [
+        app_commands.Choice(name=sec, value=sec)
+        for sec in RULES_DATA[article].keys() if current.lower() in sec.lower()
+    ][:25]
+
+# --- The Unified Command ---
+@tree.command(name="rulewarning", description="Warn a user and record it in the database")
+@app_commands.describe(
+    user="The user to warn",
+    article="Select the Rule Article",
+    section="Select the specific section",
+    message="Optional custom staff message"
+)
+@app_commands.autocomplete(article=article_autocomplete, section=section_autocomplete)
+async def rulewarning(
+    interaction: discord.Interaction, 
+    user: discord.Member, 
+    article: str, 
+    section: str, 
+    message: str = None
+):
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    rule_desc = RULES_DATA.get(article, {}).get(section, "Rule description not found.")
+    staff_msg = message if message else "this is a warning for you do not try it again"
+    
+    # Generate a unique Warning ID (Hex timestamp)
+    warn_id = hex(int(time.time()))[2:].upper()
+
+    warning_text = (
+        f"** {section} **\n\n"
+        f"{rule_desc}\n\n"
+        f"*{staff_msg}*\n"
+        f"**Warning ID:** {warn_id}"
+    )
+
+    try:
+        # Save to MongoDB
+        if coll is not None:
+            warn_entry = {
+                "warn_id": warn_id,
+                "reason": section,
+                "staff": str(interaction.user.id),
+                "timestamp": interaction.created_at
+            }
+            coll.update_one(
+                {"_id": str(user.id)},
+                {"$push": {"warnings": warn_entry}, "$inc": {"warn_count": 1}},
+                upsert=True
+            )
+
+        await user.send(warning_text)
+        await interaction.response.send_message(
+            f"✅ Warning **{warn_id}** sent to {user.mention}.", 
+            ephemeral=True
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(f"❌ Could not DM user, but the warning was recorded.", ephemeral=True)
         
+@tree.command(name="removewarning", description="Remove a specific warning by ID")
+@app_commands.describe(user="The user", warning_id="The ID of the warning to remove")
+async def removewarning(interaction: discord.Interaction, user: discord.Member, warning_id: str):
+    if not is_owner(interaction.user.id):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+        return
+
+    if coll is not None:
+        # Pull the specific warning and decrement the count
+        res = coll.update_one(
+            {"_id": str(user.id)},
+            {
+                "$pull": {"warnings": {"warn_id": warning_id.upper()}},
+                "$inc": {"warn_count": -1}
+            }
+        )
+        
+        if res.modified_count > 0:
+            await interaction.response.send_message(f"🗑️ Warning **{warning_id}** removed from {user.mention}.")
+        else:
+            await interaction.response.send_message("❓ Warning ID not found for this user.", ephemeral=True)
+
+@tree.command(name="clearwarning", description="Clear all warnings for a user")
+async def clearwarning(interaction: discord.Interaction, user: discord.Member):
+    if not is_owner(interaction.user.id):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+        return
+
+    if coll is not None:
+        coll.update_one(
+            {"_id": str(user.id)},
+            {"$set": {"warnings": [], "warn_count": 0}}
+        )
+        await interaction.response.send_message(f"🧹 All warnings cleared for {user.mention}.")
+
+@tree.command(name="warnlist", description="View all warning records for a user")
+@app_commands.describe(user="The user to check")
+async def warnlist(interaction: discord.Interaction, user: discord.Member):
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    if coll is None:
+        await interaction.response.send_message("❌ Database connection not available.", ephemeral=True)
+        return
+
+    doc = coll.find_one({"_id": str(user.id)})
+    warnings = doc.get("warnings", []) if doc else []
+
+    if not warnings:
+        await interaction.response.send_message(f"✅ **{user.display_name}** has a clean record (0 warnings).")
+        return
+
+    embed = discord.Embed(
+        title=f"Warning Records: {user.display_name}",
+        description=f"Total Violations: **{len(warnings)}**",
+        color=0xFFCC00
+    )
+    
+    # List the last 10 warnings to keep the embed clean
+    for w in warnings[-10:]:
+        # Format the timestamp if it exists, else use 'Unknown Date'
+        ts = w.get("timestamp")
+        date_str = ts.strftime("%Y-%m-%d") if hasattr(ts, 'strftime') else "N/A"
+        
+        embed.add_field(
+            name=f"ID: {w['warn_id']} | {w['reason']}",
+            value=f"Date: {date_str} | Staff: <@{w['staff']}>",
+            inline=False
+        )
+
+    await interaction.response.send_message(embed=embed)
 
 # ---------------- Message-based commands & scanning ----------------
 @bot.event
