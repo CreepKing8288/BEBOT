@@ -836,7 +836,7 @@ async def rulewarning(interaction: discord.Interaction, user: discord.Member, ar
     if not has_permission(interaction.user):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True)
         return
-
+    await interaction.response.defer(ephemeral=True)
     rule_desc = RULES_DATA.get(article, {}).get(section, "Rule description not found.")
     staff_msg = message if message else "this is a warning for you do not try it again"
     warn_id = hex(int(time.time()))[2:].upper()
