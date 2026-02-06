@@ -451,15 +451,17 @@ async def on_invite_delete(invite):
 async def on_member_join(member):
     """
     Finds who invited the member by checking which invite count increased.
-    Logs the result to the specified channel.
+    Logs the result to the specified channel with a small delay for accuracy.
     """
     guild = member.guild
     log_channel = bot.get_channel(INVITE_LOG_CHANNEL_ID)
 
-    # If we can't see the log channel, just return (or print error)
     if not log_channel:
         print(f"Invite Tracker: Log channel {INVITE_LOG_CHANNEL_ID} not found.")
         return
+
+    # Wait a moment for Discord to increment the invite usage count
+    await asyncio.sleep(1.5)
 
     inviter = None
     invite_code = None
@@ -467,24 +469,24 @@ async def on_member_join(member):
     try:
         # Get the current invites from Discord
         current_invites = await guild.invites()
-        
-        # Get the old cached invites
         old_invites = invites_cache.get(guild.id, {})
 
         # Find the invite that has a higher usage count now than before
         for invite in current_invites:
-            old_uses = old_invites.get(invite.code, 0)
-            if invite.uses > old_uses:
+            # We compare the current uses to what we have in our memory (cache)
+            if invite.code in old_invites:
+                if invite.uses > old_invites[invite.code]:
+                    inviter = invite.inviter
+                    invite_code = invite.code
+                    break
+            # Logic for a brand new invite that was used immediately
+            elif invite.uses > 0:
                 inviter = invite.inviter
                 invite_code = invite.code
-                # Update the cache immediately so it's ready for the next person
-                invites_cache[guild.id][invite.code] = invite.uses
                 break
         
-        # If we loop through everything and didn't find a match, update the whole cache
-        # just in case something got desynced.
-        if not inviter:
-             invites_cache[guild.id] = {invite.code: invite.uses for invite in current_invites}
+        # ALWAYS update the cache after a join to stay synced
+        invites_cache[guild.id] = {invite.code: invite.uses for invite in current_invites}
 
     except Exception as e:
         print(f"Error checking invites: {e}")
@@ -502,11 +504,18 @@ async def on_member_join(member):
         embed.add_field(name="Invited By", value=f"{inviter.mention}\n`{inviter.name}`", inline=True)
         embed.add_field(name="Invite Code", value=f"`{invite_code}`", inline=True)
     else:
-        embed.add_field(name="Invited By", value="Unknown / Vanity URL / Bot", inline=True)
+        # Check if it's a Vanity URL (if server has enough boosts)
+        try:
+            vanity = await guild.vanity_invite()
+            # If we still don't know the inviter, it might be the vanity URL
+            embed.add_field(name="Invited By", value="Vanity URL / Discovery", inline=True)
+        except:
+            embed.add_field(name="Invited By", value="Unknown / Direct / Bot", inline=True)
 
     embed.set_footer(text=f"User ID: {member.id}")
 
     await log_channel.send(embed=embed)
+
 
 
 # ---------------- Swear tracking helpers ----------------
