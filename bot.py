@@ -22,10 +22,14 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 def run_health_check():
-    port = int(os.environ.get("PORT", 5000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
-
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        server.serve_forever()
+    except OSError as e:
+        if e.errno == 98:
+            print("Health check server already running, skipping bind.")
+        else:
+            raise e
 # Start the health check in a separate thread
 Thread(target=run_health_check, daemon=True).start()
 
