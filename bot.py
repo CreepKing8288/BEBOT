@@ -52,6 +52,14 @@ WARN_LOG_CHANNEL_ID = 1469023340130861179
 INVITE_LOG_CHANNEL_ID = 1469126718425006332
 LOG_CHANNEL_ID = 1469332387539325044
 
+# Authorized Role IDs
+AUTHORIZED_ROLES = [
+    1458454264702832792, 
+    1458455202892877988, 
+    1458490049413906553, 
+    1458456130195034251, 
+    1458455703638376469
+]
 
 # --- Invite Tracker Cache ---
 invites_cache = {}
@@ -79,14 +87,7 @@ except ImportError:
     coll = None
     print("pymongo not installed; using local JSON fallback. Run: pip install pymongo")
 
-# Authorized Role IDs
-AUTHORIZED_ROLES = [
-    1458454264702832792, 
-    1458455202892877988, 
-    1458490049413906553, 
-    1458456130195034251, 
-    1458455703638376469
-]
+
 
 RULES_DATA = {
     "ARTICLE 1: Core Conduct": {
@@ -1067,8 +1068,44 @@ async def on_message_delete(message):
     )
     embed.add_field(name="Author", value=f"{message.author.mention} (`{message.author.id}`)", inline=True)
     embed.add_field(name="Channel", value=message.channel.mention, inline=True)
-    embed.add_field(name="Content", value=message.content or "[No text content]", inline=False)
+    
+    # Handle Text Content
+    content = message.content or "[No text content]"
+    embed.add_field(name="Content", value=content, inline=False)
+    
+    # --- NEW: Handle Image/Attachment Logging ---
+    if message.attachments:
+        # Get the first attachment URL
+        attachment = message.attachments[0]
+        if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'gif', 'webp']):
+            embed.set_image(url=attachment.proxy_url)
+            embed.add_field(name="Attachments", value=f"Image: {attachment.filename}", inline=False)
+        else:
+            embed.add_field(name="Attachments", value=f"File: {attachment.filename}", inline=False)
+
     embed.set_footer(text=f"Message ID: {message.id}")
+    
+    await channel.send(embed=embed)
+    
+@bot.event
+async def on_bulk_message_delete(messages):
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel:
+        return
+
+    # Count which users had messages deleted
+    authors = Counter(f"{m.author.name}#{m.author.discriminator}" for m in messages)
+    author_summary = "\n".join([f"**{name}**: {count} messages" for name, count in authors.items()])
+
+    embed = discord.Embed(
+        title="🧹 Mass Message Deletion (Purge)",
+        description=f"**{len(messages)}** messages were deleted in {messages[0].channel.mention}",
+        color=discord.Color.dark_red(),
+        timestamp=datetime.utcnow()
+    )
+    
+    if author_summary:
+        embed.add_field(name="Affected Users", value=author_summary[:1024], inline=False)
     
     await channel.send(embed=embed)
 
