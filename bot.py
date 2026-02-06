@@ -3,11 +3,14 @@ import os
 import json
 import re
 import time
+import asyncio
 from collections import Counter
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord import app_commands
 from datetime import datetime, timedelta
+from discord.ext import tasks
+
 
 # --- Keep-alive Server ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -22,14 +25,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 def run_health_check():
-    try:
-        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-        server.serve_forever()
-    except OSError as e:
-        if e.errno == 98:
-            print("Health check server already running, skipping bind.")
-        else:
-            raise e
+    port = int(os.environ.get("PORT", 5000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
 # Start the health check in a separate thread
 Thread(target=run_health_check, daemon=True).start()
 
@@ -144,6 +143,32 @@ if 'db' in globals() and db is not None:
     swear_words_coll = db[os.getenv("MONGO_SWEAR_COLLECTION")]
 else:
     swear_words_coll = None
+
+# --- Status Management ---
+status_coll = db["status"] if 'db' in globals() and db is not None else None
+
+async def get_custom_statuses():
+    """Fetch status list from MongoDB or return defaults."""
+    if status_coll is not None:
+        doc = status_coll.find_one({"_id": "status_list"})
+        if doc and "messages" in doc:
+            return doc["messages"]
+    
+    # Default statuses if DB is empty or unavailable
+    return ["Watching for swears...", "Type /report to help", "Kalma mga gago!"]
+
+@tasks.loop(minutes=5)
+async def change_status():
+    """Cycles through statuses fetched from MongoDB."""
+    messages = await get_custom_statuses()
+    for msg in messages:
+        # Change the 'ActivityType' to watching, listening, or playing as you like
+        await bot.change_presence(activity=discord.Game(name=msg))
+        await asyncio.sleep(30) # Wait 30 seconds before switching to the next message
+
+@change_status.before_loop
+async def before_change_status():
+    await bot.wait_until_ready()
 
 # In-memory cache to avoid repeated DB reads
 _swear_cache = None
@@ -272,7 +297,7 @@ class AppealModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         # Locate the staff log channel
         channel = interaction.client.get_channel(WARN_LOG_CHANNEL_ID)
-
+        
         if not channel:
             await interaction.response.send_message("❌ Error: Appeal channel not found.", ephemeral=True)
             return
@@ -290,7 +315,7 @@ class AppealModal(discord.ui.Modal):
         # IMPORTANT: This attaches the Approve/Reject buttons to the STAFF message
         view = AppealActionView(self.warn_id, interaction.user)
         await channel.send(embed=embed, view=view)
-
+        
         await interaction.response.send_message("✅ Your appeal has been submitted to the staff team.", ephemeral=True)
 
 class AppealView(discord.ui.View):
@@ -334,7 +359,7 @@ class AppealActionView(discord.ui.View):
         embed = interaction.message.embeds[0]
         embed.color = discord.Color.green()
         embed.add_field(name="Status", value=f"✅ Approved by {interaction.user.mention}", inline=False)
-
+        
         # Remove buttons so no one clicks again
         await interaction.message.edit(embed=embed, view=None)
         await interaction.response.send_message(f"Successfully revoked warning {self.warn_id}.", ephemeral=True)
@@ -356,14 +381,17 @@ class AppealActionView(discord.ui.View):
         embed = interaction.message.embeds[0]
         embed.color = discord.Color.red()
         embed.add_field(name="Status", value=f"❌ Rejected by {interaction.user.mention}", inline=False)
-
+        
         await interaction.message.edit(embed=embed, view=None)
         await interaction.response.send_message(f"Rejected appeal for {self.warn_id}.", ephemeral=True)
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
-
+    
+    if not change_status.is_running():
+        change_status.start()
+    
     # --- NEW: Cache existing invites on startup ---
     print("Caching invites...")
     for guild in bot.guilds:
@@ -436,7 +464,7 @@ async def on_member_join(member):
     try:
         # Get the current invites from Discord
         current_invites = await guild.invites()
-
+        
         # Get the old cached invites
         old_invites = invites_cache.get(guild.id, {})
 
@@ -449,7 +477,7 @@ async def on_member_join(member):
                 # Update the cache immediately so it's ready for the next person
                 invites_cache[guild.id][invite.code] = invite.uses
                 break
-
+        
         # If we loop through everything and didn't find a match, update the whole cache
         # just in case something got desynced.
         if not inviter:
@@ -466,7 +494,7 @@ async def on_member_join(member):
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="User", value=f"{member.mention}\n`{member.name}`", inline=True)
-
+    
     if inviter:
         embed.add_field(name="Invited By", value=f"{inviter.mention}\n`{inviter.name}`", inline=True)
         embed.add_field(name="Invite Code", value=f"`{invite_code}`", inline=True)
@@ -476,318 +504,6 @@ async def on_member_join(member):
     embed.set_footer(text=f"User ID: {member.id}")
 
     await log_channel.send(embed=embed)
-
-
-# ---------------- Swear tracking helpers ----------------
-
-def scan_text(content: str):
-    """Scan arbitrary text for tracked swear words, allowing for repeated letters."""
-    s = content.lower()
-    found = {}
-    words = get_swear_words()
-
-    for w in words:
-        # Create a pattern where each letter can be repeated: 'f+u+c+k+'
-        # This catches 'fuck', 'fuuuuuck', 'fuckkkkk', etc.
-        pattern = "".join([re.escape(char) + "+" for char in w])
-
-        # Use \b to ensure it's still treated as a word (won't catch 'refucking' unless intended)
-        matches = re.findall(r"\b" + pattern + r"\b", s, flags=re.IGNORECASE)
-
-        c = len(matches)
-        if c > 0:
-            found[w] = c
-    return found
-
-
-def record_swears(message: discord.Message):
-    """Scan the message for swear words and update storage (MongoDB or local JSON).
-    Returns a dict of {word: count} found in this message."""
-    content = message.content
-    found = scan_text(content)
-
-    # DEBUG logging
-    print(f"[swear_scan] Scanning message from {message.author} ({message.author.id}): {content!r}")
-    print(f"[swear_scan] Found: {found}")
-import discord
-import os
-import json
-import re
-import time
-from collections import Counter
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from discord import app_commands
-
-# --- Keep-alive Server ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive!")
-
-    def do_HEAD(self):
-        """Handle HEAD requests from Render's health checker"""
-        self.send_response(200)
-        self.end_headers()
-
-def run_health_check():
-    port = int(os.environ.get("PORT", 5000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
-
-# Start the health check in a separate thread
-Thread(target=run_health_check, daemon=True).start()
-
-
-hUIPJ21boH = os.getenv("DISCORD_TOKEN")
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-bot = discord.Client(intents=intents)
-
-# For slash commands
-tree = app_commands.CommandTree(bot)
-
-ANNOUNCE_CHANNEL_ID = 1458464867366342809
-
-REPORT_CHANNEL_ID = 1468224442089079071
-
-# --- Swear tracking config ---
-# MongoDB connection (set MONGODB_URI environment variable)
-MONGO_URI = os.getenv("MONGODB_URI")
-# Default words to seed the swear list (lowercase)
-DEFAULT_SWEAR_WORDS = ["fuck", "shit", "bitch", "ass", "damn", "gago"]
-# Fallback JSON file for swear word list when MongoDB is not available
-SWEAR_WORDS_FILE = "swear_words.json"
-
-# Try to connect to MongoDB (pymongo); fall back to local JSON if unavailable
-try:
-    from pymongo import MongoClient
-    if MONGO_URI:
-        client = MongoClient(MONGO_URI)
-        db = client.get_database(os.getenv("MONGO_DB"))
-        coll = db[os.getenv("MONGO_COLLECTION")]
-        print("Connected to MongoDB")
-    else:
-        coll = None
-        print("MONGODB_URI not set; using local JSON fallback.")
-except ImportError:
-    coll = None
-    print("pymongo not installed; using local JSON fallback. Run: pip install pymongo")
-
-# Authorized Role IDs
-AUTHORIZED_ROLES = [
-    1458454264702832792, 
-    1458455202892877988, 
-    1458490049413906553, 
-    1458456130195034251, 
-    1458455703638376469
-]
-
-RULES_DATA = {
-    "ARTICLE 1: Core Conduct": {
-        "1.1 Respect Boundaries": "No harassment, unwanted DMs, or 'stalking' behaviors.",
-        "1.2 Zero Tolerance": "Instant bans for hate speech, slurs, or discriminatory content.",
-        "1.3 No Drama": "Keep personal arguments in DMs; do not disrupt public channels.",
-        "1.4 Discord TOS": "All members/user must follow Discord Terms of Service"
-    },
-    "ARTICLE 2: Communication Etiquette": {
-        "2.1 Channel Clarity": "Use channels for their intended purpose (e.g., memes in #memes).",
-        "2.2 Ping Policy": "Do not use @everyone or @here without a valid reason or staff permission.",
-        "2.3 VC Etiquette": "No ear-rape, screaming, or excessive noise. Use Push-to-Talk if needed.",
-        "2.4 Advertising": "No Unauthorized Advertising: Do not post server invites or social media links without staff approval."
-    },
-    "ARTICLE 3: Safety & Integrity": {
-        "3.1 Age Limit": "Users must be 13+ (or 18+ for adult-designated servers).",
-        "3.2 NSFW Content": "Forbidden in public areas; only allowed in age-restricted channels.",
-        "3.3 Anti-Scam": "Sharing 'Free Nitro' links or suspicious downloads results in an instant ban.",
-        "3.4 No Ban Evasion": "Using alternate accounts to bypass bans or timeouts is prohibited.",
-        "3.5 Consent First": "Never share a friend's real name, location, or photo without permission.",
-        "3.6 Common Sense": "Just because something isn't explicitly written doesn't mean it’s allowed."
-    },
-    "ARTICLE 4: Admin Authority": {
-        "4.1 Staff Discretion": "Moderators have the final say on behavior not explicitly listed.",
-        "4.2 Conflict of Interest": "Staff must recuse themselves from cases involving close friends.",
-        "4.3 Evidence-Based": "All bans and kicks must be backed by logged evidence.",
-        "4.4 Internal Privacy": "Staff-room discussions are strictly confidential.",
-        "4.5 Transparency": "Staff must clearly cite the rule violated when taking action.",
-        "4.6 Power Tripping": "Avoid using staff-only permissions for jokes or to win arguments."
-    }
-}
-
-def is_owner(user_id: int):
-    """Checks if the User ID is one of the two authorized owners."""
-    return user_id in [1394914695600934932, 912385288129622147]
-
-def has_permission(member: discord.Member):
-    """Checks if the member has any of the authorized roles."""
-    return any(role.id in AUTHORIZED_ROLES for role in member.roles)
-
-DATA_FILE = "swear_data.json"
-
-def load_data():
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# Swear words storage (MongoDB collection or local JSON fallback)
-if 'db' in globals() and db is not None:
-    swear_words_coll = db[os.getenv("MONGO_SWEAR_COLLECTION")]
-else:
-    swear_words_coll = None
-
-# In-memory cache to avoid repeated DB reads
-_swear_cache = None
-
-def init_swear_words():
-    """Ensure swear words storage is seeded with defaults."""
-    global _swear_cache
-    if swear_words_coll is not None:
-        doc = swear_words_coll.find_one({"_id": "words"})
-        if not doc:
-            swear_words_coll.insert_one({"_id": "words", "words": DEFAULT_SWEAR_WORDS})
-            _swear_cache = list(DEFAULT_SWEAR_WORDS)
-            print("Seeded swear words in MongoDB")
-        else:
-            _swear_cache = list(doc.get("words", []))
-    else:
-        # Ensure local file exists
-        try:
-            with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                _swear_cache = list(data.get("words", DEFAULT_SWEAR_WORDS))
-        except FileNotFoundError:
-            with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"words": DEFAULT_SWEAR_WORDS}, f, ensure_ascii=False, indent=2)
-            _swear_cache = list(DEFAULT_SWEAR_WORDS)
-            print("Seeded local swear words file")
-
-
-def get_swear_words():
-    """Return the current list of swear words (lowercase)."""
-    global _swear_cache
-    if _swear_cache is not None:
-        return _swear_cache
-    # Cache miss: load from source
-    if swear_words_coll is not None:
-        doc = swear_words_coll.find_one({"_id": "words"})
-        words = doc.get("words", []) if doc else []
-        _swear_cache = list(words)
-        return _swear_cache
-    else:
-        try:
-            with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                _swear_cache = list(data.get("words", []))
-                return _swear_cache
-        except FileNotFoundError:
-            _swear_cache = list(DEFAULT_SWEAR_WORDS)
-            return _swear_cache
-
-
-def add_swear_word(word: str):
-    word = word.lower()
-    global _swear_cache
-    if swear_words_coll is not None:
-        res = swear_words_coll.update_one({"_id": "words"}, {"$addToSet": {"words": word}}, upsert=True)
-        # refresh cache
-        _swear_cache = None
-        get_swear_words()
-        return True
-    else:
-        words = get_swear_words()
-        if word in words:
-            return False
-        words.append(word)
-        with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"words": words}, f, ensure_ascii=False, indent=2)
-        _swear_cache = None
-        get_swear_words()
-        return True
-
-
-def remove_swear_word(word: str):
-    word = word.lower()
-    global _swear_cache
-    if swear_words_coll is not None:
-        res = swear_words_coll.update_one({"_id": "words"}, {"$pull": {"words": word}})
-        _swear_cache = None
-        get_swear_words()
-        return True
-    else:
-        words = get_swear_words()
-        if word not in words:
-            return False
-        words = [w for w in words if w != word]
-        with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"words": words}, f, ensure_ascii=False, indent=2)
-        _swear_cache = None
-        get_swear_words()
-        return True
-
-def clear_user_data(user: discord.User, word: str = None):
-    """Clears all counts or a specific word for a user in DB or JSON."""
-    uid = str(user.id)
-    if coll is not None:
-        if word:
-            coll.update_one({"_id": uid}, {"$unset": {f"counts.{word.lower()}": ""}})
-        else:
-            coll.delete_one({"_id": uid})
-    else:
-        data = load_data()
-        if uid in data:
-            if word:
-                word = word.lower()
-                if word in data[uid]:
-                    del data[uid][word]
-            else:
-                del data[uid]
-            save_data(data)
-
-# Initialize at startup
-init_swear_words()
-
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
-    print('------')
-    # Sync slash commands with Discord and log registration status
-    try:
-        synced = await tree.sync()
-        names = [c.name for c in synced]
-        print(f"Synced {len(synced)} slash command(s): {', '.join(names) if names else 'none'}")
-        # Debug: check presence of important commands
-        expected = ["top_swearer", "userswearcount", "addswear", "remswear", "listswears", "clearcount", "testscan", "report", "rulewarning", "removewarning", "clearwarning", "warnlist"]
-        for cmd in expected:
-            print(f"/{cmd} registered: {'yes' if cmd in names else 'no'}")
-    except Exception as e:
-        print("Failed to sync slash commands:", e)
-
-async def send_boost_announcement(member):
-    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(
-            title="New Server Boost! 🚀",
-            description=f"Thank you so much {member.mention} for boosting the server!",
-            color=0xf47fff
-        )
-        embed.set_image(url="https://media.tenor.com/GTrMJsHKlF8AAAAd/happy-japanese-anime.gif")
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Total Boosts", value=str(member.guild.premium_subscription_count))
-        await channel.send(embed=embed)
-
-@bot.event
-async def on_member_update(before, after):
-    if before.premium_since is None and after.premium_since is not None:
-        await send_boost_announcement(after)
 
 
 # ---------------- Swear tracking helpers ----------------
@@ -1049,6 +765,49 @@ async def clearcount(interaction: discord.Interaction, user: discord.Member, wor
             ephemeral=False
         )
 
+@tree.command(name="addstatus", description="Add a new status to the rotation")
+async def addstatus(interaction: discord.Interaction, text: str):
+    if not is_owner(interaction.user.id):
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    
+    if status_coll is not None:
+        status_coll.update_one({"_id": "status_list"}, {"$addToSet": {"messages": text}}, upsert=True)
+        await interaction.response.send_message(f"✅ Added status: `{text}`")
+
+@tree.command(name="clearstatuses", description="Wipe all custom statuses")
+async def clearstatuses(interaction: discord.Interaction):
+    if not is_owner(interaction.user.id):
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    
+    if status_coll is not None:
+        status_coll.delete_one({"_id": "status_list"})
+        await interaction.response.send_message("🧹 Status list cleared. Reverting to defaults.")
+
+async def send_warn_log(action, staff, user, reason=None, warn_id=None, extra=None):
+    """Sends a formatted embed to the warning logs channel."""
+    channel = bot.get_channel(WARN_LOG_CHANNEL_ID)
+    if not channel:
+        return
+
+    # Color coding for different actions
+    color = 0xFFA500  # Orange for Issue
+    if "Removed" in action: color = 0x3498DB # Blue
+    if "Cleared" in action: color = 0xE74C3C # Red
+
+    embed = discord.Embed(title=f"📋 {action}", color=color, timestamp=datetime.utcnow())
+    embed.add_field(name="Target User", value=f"{user.mention} (`{user.id}`)", inline=True)
+    embed.add_field(name="Staff Member", value=f"{staff.mention}", inline=True)
+    
+    if warn_id:
+        embed.add_field(name="Warning ID", value=f"`{warn_id}`", inline=True)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    if extra:
+        embed.add_field(name="Penalty/Notes", value=extra, inline=False)
+        
+    embed.set_thumbnail(url=user.display_avatar.url)
+    await channel.send(embed=embed)
+
 # --- Rule Warning Autocomplete Helpers ---
 async def article_autocomplete(interaction: discord.Interaction, current: str):
     return [
@@ -1066,96 +825,89 @@ async def section_autocomplete(interaction: discord.Interaction, current: str):
         for sec in RULES_DATA[article].keys() if current.lower() in sec.lower()
     ][:25]
 
-# --- The Unified Command ---
+# --- The Rule Warn Command ---
 @tree.command(name="rulewarning", description="Warn a user and record it in the database")
-@app_commands.describe(
-    user="The user to warn",
-    article="Select the Rule Article",
-    section="Select the specific section",
-    message="Optional custom staff message"
-)
+@app_commands.describe(user="The user to warn", article="Select the Rule Article", section="Select the specific section", message="Optional custom staff message")
 @app_commands.autocomplete(article=article_autocomplete, section=section_autocomplete)
-async def rulewarning(
-    interaction: discord.Interaction, 
-    user: discord.Member, 
-    article: str, 
-    section: str, 
-    message: str = None
-):
+async def rulewarning(interaction: discord.Interaction, user: discord.Member, article: str, section: str, message: str = None):
     if not has_permission(interaction.user):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True)
         return
 
     rule_desc = RULES_DATA.get(article, {}).get(section, "Rule description not found.")
     staff_msg = message if message else "this is a warning for you do not try it again"
-    
-    # Generate a unique Warning ID (Hex timestamp)
     warn_id = hex(int(time.time()))[2:].upper()
 
-    warning_text = (
-        f"** {section} **\n\n"
-        f"{rule_desc}\n\n"
-        f"*{staff_msg}*\n"
-        f"**Warning ID:** {warn_id}"
-    )
-
     try:
-        # Save to MongoDB
+        current_warns = 0
         if coll is not None:
-            warn_entry = {
-                "warn_id": warn_id,
-                "reason": section,
-                "staff": str(interaction.user.id),
-                "timestamp": interaction.created_at
-            }
-            coll.update_one(
-                {"_id": str(user.id)},
-                {"$push": {"warnings": warn_entry}, "$inc": {"warn_count": 1}},
-                upsert=True
-            )
+            warn_entry = {"warn_id": warn_id, "reason": section, "staff": str(interaction.user.id), "timestamp": datetime.utcnow()}
+            res = coll.find_one_and_update({"_id": str(user.id)}, {"$push": {"warnings": warn_entry}, "$inc": {"warn_count": 1}}, upsert=True, return_document=True)
+            current_warns = res.get("warn_count", 0)
 
-        await user.send(warning_text)
-        await interaction.response.send_message(
-            f"✅ Warning **{warn_id}** sent to {user.mention}.", 
-            ephemeral=True
-        )
-    except discord.Forbidden:
-        await interaction.response.send_message(f"❌ Could not DM user, but the warning was recorded.", ephemeral=True)
+        # Punishment Logic
+        penalty_text = "None"
+        timeout_duration = None
+        if current_warns >= 5:
+            timeout_duration = timedelta(hours=12)
+            penalty_text = "12 Hour Timeout"
+        elif current_warns >= 3:
+            timeout_duration = timedelta(hours=5)
+            penalty_text = "5 Hour Timeout"
+
+        if timeout_duration:
+            try:
+                await user.timeout(timeout_duration, reason=f"Reached {current_warns} warnings.")
+            except Exception as e:
+                penalty_text += f" (Failed: {e})"
+
+        # Send DM with Appeal Button
+        dm_text = f"⚠️ **Warning Issued**\n**Rule:** {section}\n{rule_desc}\n\n*Note: {staff_msg}*\n**Warning ID:** {warn_id}"
+        if timeout_duration:
+            dm_text += f"\n\n**Penalty:** You have been timed out for {penalty_text}."
         
+        try:
+            # THIS IS THE CHANGED PART: We attach the AppealView here
+            view = AppealView(warn_id, section)
+            await user.send(dm_text, view=view)
+        except discord.Forbidden:
+            # If user has DMs off, we can't send the button
+            pass
+        except Exception as e:
+            print(f"Failed to send DM: {e}")
+
+        # Send LOG
+        await send_warn_log("Warning Issued", interaction.user, user, reason=section, warn_id=warn_id, extra=f"Total Warnings: {current_warns}\nPenalty: {penalty_text}")
+        
+        await interaction.response.send_message(f"✅ Warning **{warn_id}** recorded. (Total: {current_warns})", ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+
 @tree.command(name="removewarning", description="Remove a specific warning by ID")
-@app_commands.describe(user="The user", warning_id="The ID of the warning to remove")
 async def removewarning(interaction: discord.Interaction, user: discord.Member, warning_id: str):
-    if not is_owner(interaction.user.id):
-        await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
         return
 
     if coll is not None:
-        # Pull the specific warning and decrement the count
-        res = coll.update_one(
-            {"_id": str(user.id)},
-            {
-                "$pull": {"warnings": {"warn_id": warning_id.upper()}},
-                "$inc": {"warn_count": -1}
-            }
-        )
-        
+        res = coll.update_one({"_id": str(user.id)}, {"$pull": {"warnings": {"warn_id": warning_id.upper()}}, "$inc": {"warn_count": -1}})
         if res.modified_count > 0:
-            await interaction.response.send_message(f"🗑️ Warning **{warning_id}** removed from {user.mention}.")
+            await send_warn_log("Warning Removed", interaction.user, user, warn_id=warning_id.upper())
+            await interaction.response.send_message(f"🗑️ Removed warning **{warning_id}**.")
         else:
-            await interaction.response.send_message("❓ Warning ID not found for this user.", ephemeral=True)
+            await interaction.response.send_message("ID not found.", ephemeral=True)
 
 @tree.command(name="clearwarning", description="Clear all warnings for a user")
 async def clearwarning(interaction: discord.Interaction, user: discord.Member):
-    if not is_owner(interaction.user.id):
-        await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
         return
 
     if coll is not None:
-        coll.update_one(
-            {"_id": str(user.id)},
-            {"$set": {"warnings": [], "warn_count": 0}}
-        )
-        await interaction.response.send_message(f"🧹 All warnings cleared for {user.mention}.")
+        coll.update_one({"_id": str(user.id)}, {"$set": {"warnings": [], "warn_count": 0}})
+        await send_warn_log("Warnings Cleared", interaction.user, user, extra="All warning data wiped.")
+        await interaction.response.send_message(f"🧹 Cleared all records for {user.mention}.")
 
 @tree.command(name="warnlist", description="View all warning records for a user")
 @app_commands.describe(user="The user to check")
