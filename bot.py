@@ -7,6 +7,513 @@ from collections import Counter
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord import app_commands
+from datetime import datetime, timedelta
+
+# --- Keep-alive Server ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+    def do_HEAD(self):
+        """Handle HEAD requests from Render's health checker"""
+        self.send_response(200)
+        self.end_headers()
+
+def run_health_check():
+    port = int(os.environ.get("PORT", 5000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# Start the health check in a separate thread
+Thread(target=run_health_check, daemon=True).start()
+
+
+hUIPJ21boH = os.getenv("DISCORD_TOKEN")
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+# --- NEW: Enable Invite Tracking Intent ---
+intents.invites = True 
+
+bot = discord.Client(intents=intents)
+
+# For slash commands
+tree = app_commands.CommandTree(bot)
+
+ANNOUNCE_CHANNEL_ID = 1458464867366342809
+REPORT_CHANNEL_ID = 1468224442089079071
+WARN_LOG_CHANNEL_ID = 1469023340130861179
+INVITE_LOG_CHANNEL_ID = 1469126718425006332
+
+# --- Invite Tracker Cache ---
+invites_cache = {}
+
+# --- Swear tracking config ---
+# MongoDB connection (set MONGODB_URI environment variable)
+MONGO_URI = os.getenv("MONGODB_URI")
+# Default words to seed the swear list (lowercase)
+DEFAULT_SWEAR_WORDS = ["fuck", "shit", "bitch", "ass", "damn", "gago"]
+# Fallback JSON file for swear word list when MongoDB is not available
+SWEAR_WORDS_FILE = "swear_words.json"
+
+# Try to connect to MongoDB (pymongo); fall back to local JSON if unavailable
+try:
+    from pymongo import MongoClient
+    if MONGO_URI:
+        client = MongoClient(MONGO_URI)
+        db = client.get_database(os.getenv("MONGO_DB"))
+        coll = db[os.getenv("MONGO_COLLECTION")]
+        print("Connected to MongoDB")
+    else:
+        coll = None
+        print("MONGODB_URI not set; using local JSON fallback.")
+except ImportError:
+    coll = None
+    print("pymongo not installed; using local JSON fallback. Run: pip install pymongo")
+
+# Authorized Role IDs
+AUTHORIZED_ROLES = [
+    1458454264702832792, 
+    1458455202892877988, 
+    1458490049413906553, 
+    1458456130195034251, 
+    1458455703638376469
+]
+
+RULES_DATA = {
+    "ARTICLE 1: Core Conduct": {
+        "1.1 Respect Boundaries": "No harassment, unwanted DMs, or 'stalking' behaviors.",
+        "1.2 Zero Tolerance": "Instant bans for hate speech, slurs, or discriminatory content.",
+        "1.3 No Drama": "Keep personal arguments in DMs; do not disrupt public channels.",
+        "1.4 Discord TOS": "All members/user must follow Discord Terms of Service"
+    },
+    "ARTICLE 2: Communication Etiquette": {
+        "2.1 Channel Clarity": "Use channels for their intended purpose (e.g., memes in #memes).",
+        "2.2 Ping Policy": "Do not use @everyone or @here without a valid reason or staff permission.",
+        "2.3 VC Etiquette": "No ear-rape, screaming, or excessive noise. Use Push-to-Talk if needed.",
+        "2.4 Advertising": "No Unauthorized Advertising: Do not post server invites or social media links without staff approval."
+    },
+    "ARTICLE 3: Safety & Integrity": {
+        "3.1 Age Limit": "Users must be 13+ (or 18+ for adult-designated servers).",
+        "3.2 NSFW Content": "Forbidden in public areas; only allowed in age-restricted channels.",
+        "3.3 Anti-Scam": "Sharing 'Free Nitro' links or suspicious downloads results in an instant ban.",
+        "3.4 No Ban Evasion": "Using alternate accounts to bypass bans or timeouts is prohibited.",
+        "3.5 Consent First": "Never share a friend's real name, location, or photo without permission.",
+        "3.6 Common Sense": "Just because something isn't explicitly written doesn't mean it’s allowed."
+    },
+    "ARTICLE 4: Admin Authority": {
+        "4.1 Staff Discretion": "Moderators have the final say on behavior not explicitly listed.",
+        "4.2 Conflict of Interest": "Staff must recuse themselves from cases involving close friends.",
+        "4.3 Evidence-Based": "All bans and kicks must be backed by logged evidence.",
+        "4.4 Internal Privacy": "Staff-room discussions are strictly confidential.",
+        "4.5 Transparency": "Staff must clearly cite the rule violated when taking action.",
+        "4.6 Power Tripping": "Avoid using staff-only permissions for jokes or to win arguments."
+    }
+}
+
+def is_owner(user_id: int):
+    """Checks if the User ID is one of the two authorized owners."""
+    return user_id in [1394914695600934932, 912385288129622147]
+
+def has_permission(member: discord.Member):
+    """Checks if the member has any of the authorized roles."""
+    return any(role.id in AUTHORIZED_ROLES for role in member.roles)
+
+DATA_FILE = "swear_data.json"
+
+def load_data():
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# Swear words storage (MongoDB collection or local JSON fallback)
+if 'db' in globals() and db is not None:
+    swear_words_coll = db[os.getenv("MONGO_SWEAR_COLLECTION")]
+else:
+    swear_words_coll = None
+
+# In-memory cache to avoid repeated DB reads
+_swear_cache = None
+
+def init_swear_words():
+    """Ensure swear words storage is seeded with defaults."""
+    global _swear_cache
+    if swear_words_coll is not None:
+        doc = swear_words_coll.find_one({"_id": "words"})
+        if not doc:
+            swear_words_coll.insert_one({"_id": "words", "words": DEFAULT_SWEAR_WORDS})
+            _swear_cache = list(DEFAULT_SWEAR_WORDS)
+            print("Seeded swear words in MongoDB")
+        else:
+            _swear_cache = list(doc.get("words", []))
+    else:
+        # Ensure local file exists
+        try:
+            with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                _swear_cache = list(data.get("words", DEFAULT_SWEAR_WORDS))
+        except FileNotFoundError:
+            with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"words": DEFAULT_SWEAR_WORDS}, f, ensure_ascii=False, indent=2)
+            _swear_cache = list(DEFAULT_SWEAR_WORDS)
+            print("Seeded local swear words file")
+
+
+def get_swear_words():
+    """Return the current list of swear words (lowercase)."""
+    global _swear_cache
+    if _swear_cache is not None:
+        return _swear_cache
+    # Cache miss: load from source
+    if swear_words_coll is not None:
+        doc = swear_words_coll.find_one({"_id": "words"})
+        words = doc.get("words", []) if doc else []
+        _swear_cache = list(words)
+        return _swear_cache
+    else:
+        try:
+            with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                _swear_cache = list(data.get("words", []))
+                return _swear_cache
+        except FileNotFoundError:
+            _swear_cache = list(DEFAULT_SWEAR_WORDS)
+            return _swear_cache
+
+def add_swear_word(word: str):
+    word = word.lower()
+    global _swear_cache
+    if swear_words_coll is not None:
+        res = swear_words_coll.update_one({"_id": "words"}, {"$addToSet": {"words": word}}, upsert=True)
+        # refresh cache
+        _swear_cache = None
+        get_swear_words()
+        return True
+    else:
+        words = get_swear_words()
+        if word in words:
+            return False
+        words.append(word)
+        with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"words": words}, f, ensure_ascii=False, indent=2)
+        _swear_cache = None
+        get_swear_words()
+        return True
+
+def remove_swear_word(word: str):
+    word = word.lower()
+    global _swear_cache
+    if swear_words_coll is not None:
+        res = swear_words_coll.update_one({"_id": "words"}, {"$pull": {"words": word}})
+        _swear_cache = None
+        get_swear_words()
+        return True
+    else:
+        words = get_swear_words()
+        if word not in words:
+            return False
+        words = [w for w in words if w != word]
+        with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"words": words}, f, ensure_ascii=False, indent=2)
+        _swear_cache = None
+        get_swear_words()
+        return True
+
+def clear_user_data(user: discord.User, word: str = None):
+    """Clears all counts or a specific word for a user in DB or JSON."""
+    uid = str(user.id)
+    if coll is not None:
+        if word:
+            coll.update_one({"_id": uid}, {"$unset": {f"counts.{word.lower()}": ""}})
+        else:
+            coll.delete_one({"_id": uid})
+    else:
+        data = load_data()
+        if uid in data:
+            if word:
+                word = word.lower()
+                if word in data[uid]:
+                    del data[uid][word]
+            else:
+                del data[uid]
+            save_data(data)
+
+# Initialize at startup
+init_swear_words()
+# --- Classes ---
+# --- Appeal UI ---
+class AppealModal(discord.ui.Modal):
+    def __init__(self, warn_id, reason):
+        super().__init__(title=f"Appeal Warning: {warn_id}")
+        self.warn_id = warn_id
+        self.warn_reason = reason
+
+    defense = discord.ui.TextInput(
+        label="Why should this warning be revoked?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Explain your side of the story here...",
+        required=True,
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Locate the staff log channel
+        channel = interaction.client.get_channel(WARN_LOG_CHANNEL_ID)
+
+        if not channel:
+            await interaction.response.send_message("❌ Error: Appeal channel not found.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="⚖️ New Warning Appeal",
+            description=f"**User:** {interaction.user.mention} (`{interaction.user.id}`)\n**Warning ID:** `{self.warn_id}`",
+            color=0x9B59B6,
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="Original Reason", value=self.warn_reason, inline=True)
+        embed.add_field(name="User's Defense", value=self.defense.value, inline=False)
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+
+        # IMPORTANT: This attaches the Approve/Reject buttons to the STAFF message
+        view = AppealActionView(self.warn_id, interaction.user)
+        await channel.send(embed=embed, view=view)
+
+        await interaction.response.send_message("✅ Your appeal has been submitted to the staff team.", ephemeral=True)
+
+class AppealView(discord.ui.View):
+    def __init__(self, warn_id, reason):
+        super().__init__(timeout=None) # Button doesn't expire
+        self.warn_id = warn_id
+        self.warn_reason = reason
+
+    @discord.ui.button(label="👮 Appeal Warning", style=discord.ButtonStyle.secondary, emoji="⚖️")
+    async def appeal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Open the modal when button is clicked
+        await interaction.response.send_modal(AppealModal(self.warn_id, self.warn_reason))
+
+class AppealActionView(discord.ui.View):
+    def __init__(self, warn_id, target_user: discord.Member):
+        super().__init__(timeout=None)
+        self.warn_id = warn_id
+        self.target_user = target_user
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Permission Check
+        if not any(role.id in [1458454264702832792, 1458455202892877988, 1458490049413906553, 1458456130195034251, 1458455703638376469] for role in interaction.user.roles):
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+
+        # 1. Remove warning from MongoDB
+        if coll is not None:
+            coll.update_one(
+                {"_id": str(self.target_user.id)}, 
+                {"$pull": {"warnings": {"warn_id": self.warn_id}}, "$inc": {"warn_count": -1}}
+            )
+
+        # 2. Notify the User (Approved)
+        try:
+            await self.target_user.send(f"✅ Your appeal for warning **{self.warn_id}** has been **APPROVED**. The warning has been removed from your record.")
+        except discord.Forbidden:
+            pass 
+
+        # 3. Update the log message so other staff know it's handled
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.green()
+        embed.add_field(name="Status", value=f"✅ Approved by {interaction.user.mention}", inline=False)
+
+        # Remove buttons so no one clicks again
+        await interaction.message.edit(embed=embed, view=None)
+        await interaction.response.send_message(f"Successfully revoked warning {self.warn_id}.", ephemeral=True)
+
+    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Permission Check
+        if not any(role.id in [1458454264702832792, 1458455202892877988, 1458490049413906553, 1458456130195034251, 1458455703638376469] for role in interaction.user.roles):
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+
+        # 1. Notify the User (Rejected)
+        try:
+            await self.target_user.send(f"❌ Your appeal for warning **{self.warn_id}** has been **REJECTED**. This decision is final.")
+        except discord.Forbidden:
+            pass
+
+        # 2. Update the log message
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.red()
+        embed.add_field(name="Status", value=f"❌ Rejected by {interaction.user.mention}", inline=False)
+
+        await interaction.message.edit(embed=embed, view=None)
+        await interaction.response.send_message(f"Rejected appeal for {self.warn_id}.", ephemeral=True)
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
+
+    # --- NEW: Cache existing invites on startup ---
+    print("Caching invites...")
+    for guild in bot.guilds:
+        try:
+            invs = await guild.invites()
+            invites_cache[guild.id] = {invite.code: invite.uses for invite in invs}
+            print(f"Cached {len(invs)} invites for {guild.name}")
+        except Exception as e:
+            print(f"Could not cache invites for {guild.name}: {e}")
+
+    print('------')
+    # Sync slash commands with Discord and log registration status
+    try:
+        synced = await tree.sync()
+        names = [c.name for c in synced]
+        print(f"Synced {len(synced)} slash command(s): {', '.join(names) if names else 'none'}")
+    except Exception as e:
+        print("Failed to sync slash commands:", e)
+
+async def send_boost_announcement(member):
+    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(
+            title="New Server Boost! 🚀",
+            description=f"Thank you so much {member.mention} for boosting the server!",
+            color=0xf47fff
+        )
+        embed.set_image(url="https://media.tenor.com/GTrMJsHKlF8AAAAd/happy-japanese-anime.gif")
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Total Boosts", value=str(member.guild.premium_subscription_count))
+        await channel.send(embed=embed)
+
+@bot.event
+async def on_member_update(before, after):
+    if before.premium_since is None and after.premium_since is not None:
+        await send_boost_announcement(after)
+
+# --- NEW: Invite Tracking Events ---
+
+@bot.event
+async def on_invite_create(invite):
+    """Updates cache when a new invite is created."""
+    if invite.guild.id not in invites_cache:
+        invites_cache[invite.guild.id] = {}
+    invites_cache[invite.guild.id][invite.code] = invite.uses
+
+@bot.event
+async def on_invite_delete(invite):
+    """Updates cache when an invite is deleted."""
+    if invite.guild.id in invites_cache and invite.code in invites_cache[invite.guild.id]:
+        del invites_cache[invite.guild.id][invite.code]
+
+@bot.event
+async def on_member_join(member):
+    """
+    Finds who invited the member by checking which invite count increased.
+    Logs the result to the specified channel.
+    """
+    guild = member.guild
+    log_channel = bot.get_channel(INVITE_LOG_CHANNEL_ID)
+
+    # If we can't see the log channel, just return (or print error)
+    if not log_channel:
+        print(f"Invite Tracker: Log channel {INVITE_LOG_CHANNEL_ID} not found.")
+        return
+
+    inviter = None
+    invite_code = None
+
+    try:
+        # Get the current invites from Discord
+        current_invites = await guild.invites()
+
+        # Get the old cached invites
+        old_invites = invites_cache.get(guild.id, {})
+
+        # Find the invite that has a higher usage count now than before
+        for invite in current_invites:
+            old_uses = old_invites.get(invite.code, 0)
+            if invite.uses > old_uses:
+                inviter = invite.inviter
+                invite_code = invite.code
+                # Update the cache immediately so it's ready for the next person
+                invites_cache[guild.id][invite.code] = invite.uses
+                break
+
+        # If we loop through everything and didn't find a match, update the whole cache
+        # just in case something got desynced.
+        if not inviter:
+             invites_cache[guild.id] = {invite.code: invite.uses for invite in current_invites}
+
+    except Exception as e:
+        print(f"Error checking invites: {e}")
+
+    # --- Create Log Embed ---
+    embed = discord.Embed(
+        title="📥 Member Joined",
+        color=0x2ecc71, # Green
+        timestamp=datetime.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="User", value=f"{member.mention}\n`{member.name}`", inline=True)
+
+    if inviter:
+        embed.add_field(name="Invited By", value=f"{inviter.mention}\n`{inviter.name}`", inline=True)
+        embed.add_field(name="Invite Code", value=f"`{invite_code}`", inline=True)
+    else:
+        embed.add_field(name="Invited By", value="Unknown / Vanity URL / Bot", inline=True)
+
+    embed.set_footer(text=f"User ID: {member.id}")
+
+    await log_channel.send(embed=embed)
+
+
+# ---------------- Swear tracking helpers ----------------
+
+def scan_text(content: str):
+    """Scan arbitrary text for tracked swear words, allowing for repeated letters."""
+    s = content.lower()
+    found = {}
+    words = get_swear_words()
+
+    for w in words:
+        # Create a pattern where each letter can be repeated: 'f+u+c+k+'
+        # This catches 'fuck', 'fuuuuuck', 'fuckkkkk', etc.
+        pattern = "".join([re.escape(char) + "+" for char in w])
+
+        # Use \b to ensure it's still treated as a word (won't catch 'refucking' unless intended)
+        matches = re.findall(r"\b" + pattern + r"\b", s, flags=re.IGNORECASE)
+
+        c = len(matches)
+        if c > 0:
+            found[w] = c
+    return found
+
+
+def record_swears(message: discord.Message):
+    """Scan the message for swear words and update storage (MongoDB or local JSON).
+    Returns a dict of {word: count} found in this message."""
+    content = message.content
+    found = scan_text(content)
+
+    # DEBUG logging
+    print(f"[swear_scan] Scanning message from {message.author} ({message.author.id}): {content!r}")
+    print(f"[swear_scan] Found: {found}")
+import discord
+import os
+import json
+import re
+import time
+from collections import Counter
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from discord import app_commands
 
 # --- Keep-alive Server ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
