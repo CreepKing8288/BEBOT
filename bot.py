@@ -50,6 +50,8 @@ ANNOUNCE_CHANNEL_ID = 1458464867366342809
 REPORT_CHANNEL_ID = 1468224442089079071
 WARN_LOG_CHANNEL_ID = 1469023340130861179
 INVITE_LOG_CHANNEL_ID = 1469126718425006332
+LOG_CHANNEL_ID = 1469332387539325044
+
 
 # --- Invite Tracker Cache ---
 invites_cache = {}
@@ -1048,5 +1050,82 @@ async def on_message(message):
             await message.channel.send("No swear words tracked.")
             return
         await message.channel.send("Tracked words: " + ", ".join(words))
+
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot:
+        return
+    
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel:
+        return
+
+    embed = discord.Embed(
+        title="🗑️ Message Deleted",
+        color=discord.Color.red(),
+        timestamp=datetime.utcnow()
+    )
+    embed.add_field(name="Author", value=f"{message.author.mention} (`{message.author.id}`)", inline=True)
+    embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+    embed.add_field(name="Content", value=message.content or "[No text content]", inline=False)
+    embed.set_footer(text=f"Message ID: {message.id}")
+    
+    await channel.send(embed=embed)
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot or before.content == after.content:
+        return
+
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel:
+        return
+
+    embed = discord.Embed(
+        title="📝 Message Edited",
+        color=discord.Color.blue(),
+        timestamp=datetime.utcnow()
+    )
+    embed.add_field(name="Author", value=f"{before.author.mention} (`{before.author.id}`)", inline=True)
+    embed.add_field(name="Channel", value=before.channel.mention, inline=True)
+    embed.add_field(name="Before", value=before.content or "[No text content]", inline=False)
+    embed.add_field(name="After", value=after.content or "[No text content]", inline=False)
+    
+    await channel.send(embed=embed)
+
+# --- Voice Channel Logs ---
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel:
+        return
+
+    embed = discord.Embed(timestamp=datetime.utcnow())
+    embed.set_author(name=f"{member.name}#{member.discriminator}", icon_url=member.display_avatar.url)
+
+    # User Joined VC
+    if before.channel is None and after.channel is not None:
+        embed.title = "🔊 Joined Voice Channel"
+        embed.color = discord.Color.green()
+        embed.description = f"{member.mention} joined **{after.channel.name}**"
+    
+    # User Left VC
+    elif before.channel is not None and after.channel is None:
+        embed.title = "🔇 Left Voice Channel"
+        embed.color = discord.Color.red()
+        embed.description = f"{member.mention} left **{before.channel.name}**"
+    
+    # User Switched VC
+    elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
+        embed.title = "↔️ Switched Voice Channel"
+        embed.color = discord.Color.gold()
+        embed.description = f"{member.mention} moved from **{before.channel.name}** to **{after.channel.name}**"
+    
+    else:
+        # Ignore mute/deafen updates
+        return
+
+    await channel.send(embed=embed)
 
 bot.run(hUIPJ21boH)
