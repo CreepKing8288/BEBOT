@@ -78,7 +78,7 @@ try:
     if MONGO_URI:
         client = MongoClient(MONGO_URI)
         db = client.get_database(os.getenv("MONGO_DB"))
-        coll = db[os.getenv("MONGO_COLLECTION")]
+        coll = db[os.getenv("MONGO_COLLECTION", "swear_counts")]
         print("Connected to MongoDB")
     else:
         coll = None
@@ -143,9 +143,39 @@ def save_data(data):
 
 # Swear words storage (MongoDB collection or local JSON fallback)
 if 'db' in globals() and db is not None:
-    swear_words_coll = db[os.getenv("MONGO_SWEAR_COLLECTION")]
+    # Existing counts collection
+    swear_words_coll = db[os.getenv("MONGO_COLLECTION")]
+    # NEW: Dedicated Profile collection for points and referral codes
+    profile_coll = db["Profile"]
+    # NEW: Tracker to prevent re-using referrals on rejoin
+    ref_tracker_coll = db["ReferralTracker"] 
 else:
-    swear_words_coll = None
+    profile_coll = None
+    ref_tracker_coll = None
+
+def update_points(user_id: int, amount: int):
+    """Adds or subtracts points in the Profile collection."""
+    uid = str(user_id)
+    if profile_coll is not None:
+        profile_coll.update_one({"_id": uid}, {"$inc": {"points": amount}}, upsert=True)
+    else:
+        # Local JSON Fallback
+        data = load_data()
+        user = data.get(uid, {})
+        user["points"] = user.get("points", 0) + amount
+        data[uid] = user
+        save_data(data)
+        
+def has_used_referral(new_member_id: int):
+    """Checks if a user has ever triggered a referral point before."""
+    if ref_tracker_coll is not None:
+        return ref_tracker_coll.find_one({"_id": str(new_member_id)}) is not None
+    return False # Fallback if DB is down
+
+def mark_referral_used(new_member_id: int):
+    """Logs that a user has used a referral so they can't give points again."""
+    if ref_tracker_coll is not None:
+        ref_tracker_coll.insert_one({"_id": str(new_member_id), "used_at": datetime.utcnow()})
 
 # --- Status Management ---
 status_coll = db["status"] if 'db' in globals() and db is not None else None
@@ -179,16 +209,16 @@ _swear_cache = None
 def init_swear_words():
     """Ensure swear words storage is seeded with defaults."""
     global _swear_cache
-    if swear_words_coll is not None:
-        doc = swear_words_coll.find_one({"_id": "words"})
+    # Change 'swear_words_coll' to 'coll'
+    if coll is not None:
+        doc = coll.find_one({"_id": "words"})
         if not doc:
-            swear_words_coll.insert_one({"_id": "words", "words": DEFAULT_SWEAR_WORDS})
+            coll.insert_one({"_id": "words", "words": DEFAULT_SWEAR_WORDS})
             _swear_cache = list(DEFAULT_SWEAR_WORDS)
             print("Seeded swear words in MongoDB")
         else:
             _swear_cache = list(doc.get("words", []))
     else:
-        # Ensure local file exists
         try:
             with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -431,6 +461,7 @@ async def send_boost_announcement(member):
 async def on_member_update(before, after):
     if before.premium_since is None and after.premium_since is not None:
         await send_boost_announcement(after)
+        update_points(after.id, 50)
 
 # --- NEW: Invite Tracking Events ---
 
@@ -449,74 +480,80 @@ async def on_invite_delete(invite):
 
 @bot.event
 async def on_member_join(member):
-    """
-    Finds who invited the member by checking which invite count increased.
-    Logs the result to the specified channel with a small delay for accuracy.
-    """
     guild = member.guild
     log_channel = bot.get_channel(INVITE_LOG_CHANNEL_ID)
-
-    if not log_channel:
-        print(f"Invite Tracker: Log channel {INVITE_LOG_CHANNEL_ID} not found.")
-        return
-
-    # Wait a moment for Discord to increment the invite usage count
     await asyncio.sleep(1.5)
 
     inviter = None
-    invite_code = None
+    invite_code = "Unknown"
 
     try:
-        # Get the current invites from Discord
         current_invites = await guild.invites()
         old_invites = invites_cache.get(guild.id, {})
-
-        # Find the invite that has a higher usage count now than before
+        
         for invite in current_invites:
-            # We compare the current uses to what we have in our memory (cache)
-            if invite.code in old_invites:
-                if invite.uses > old_invites[invite.code]:
-                    inviter = invite.inviter
-                    invite_code = invite.code
-                    break
-            # Logic for a brand new invite that was used immediately
-            elif invite.uses > 0:
-                inviter = invite.inviter
+            if invite.code in old_invites and invite.uses > old_invites[invite.code]:
                 invite_code = invite.code
+                # Check if this code belongs to a user in our referral system
+                ref_owner_id = get_inviter_by_code(invite_code)
+                if ref_owner_id:
+                    inviter = guild.get_member(ref_owner_id) or await bot.fetch_user(ref_owner_id)
+                else:
+                    # Fallback to standard discord inviter if not in referral system
+                    inviter = invite.inviter
                 break
         
-        # ALWAYS update the cache after a join to stay synced
         invites_cache[guild.id] = {invite.code: invite.uses for invite in current_invites}
-
     except Exception as e:
-        print(f"Error checking invites: {e}")
+        print(f"Invite tracking error: {e}")
 
-    # --- Create Log Embed ---
-    embed = discord.Embed(
-        title="📥 Member Joined",
-        color=0x2ecc71, # Green
-        timestamp=datetime.utcnow()
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="User", value=f"{member.mention}\n`{member.name}`", inline=True)
-    
+    # Award Point (Lowered to 1 as requested)
     if inviter:
-        embed.add_field(name="Invited By", value=f"{inviter.mention}\n`{inviter.name}`", inline=True)
-        embed.add_field(name="Invite Code", value=f"`{invite_code}`", inline=True)
+        update_points(inviter.id, 1)
+
+    if log_channel:
+        embed = discord.Embed(title="📥 Referral Joined", color=0x2ecc71, timestamp=datetime.utcnow())
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="New Member", value=member.mention, inline=True)
+        embed.add_field(name="Referrer", value=inviter.mention if inviter else "Unknown", inline=True)
+        embed.add_field(name="Code Used", value=f"`{invite_code}`", inline=True)
+        if inviter:
+            embed.set_footer(text="Verified Referral: +1 Point awarded")
+        await log_channel.send(embed=embed)
+
+# ---------------- User Data Helpers ----------------
+def get_user_data(user_id: int):
+    """Fetch full user document."""
+    uid = str(user_id)
+    if coll is not None:
+        doc = coll.find_one({"_id": uid})
+        return doc if doc else {}
     else:
-        # Check if it's a Vanity URL (if server has enough boosts)
-        try:
-            vanity = await guild.vanity_invite()
-            # If we still don't know the inviter, it might be the vanity URL
-            embed.add_field(name="Invited By", value="Vanity URL / Discovery", inline=True)
-        except:
-            embed.add_field(name="Invited By", value="Unknown / Direct / Bot", inline=True)
+        return load_data().get(uid, {})
 
-    embed.set_footer(text=f"User ID: {member.id}")
+def update_points(user_id: int, amount: int):
+    """Adds or subtracts points for a user."""
+    uid = str(user_id)
+    if coll is not None:
+        coll.update_one({"_id": uid}, {"$inc": {"points": amount}}, upsert=True)
+    else:
+        data = load_data()
+        user = data.get(uid, {})
+        user["points"] = user.get("points", 0) + amount
+        data[uid] = user
+        save_data(data)
 
-    await log_channel.send(embed=embed)
-
-
+def get_inviter_by_code(code: str):
+    """Finds the user ID associated with a custom referral code."""
+    if coll is not None:
+        doc = coll.find_one({"referral_code": code})
+        return int(doc["_id"]) if doc else None
+    else:
+        data = load_data()
+        for uid, udata in data.items():
+            if udata.get("referral_code") == code:
+                return int(uid)
+    return None
 
 # ---------------- Swear tracking helpers ----------------
 
@@ -632,6 +669,128 @@ def get_leaderboard(guild, limit=10):
 
 
 # ---------------- Slash commands ----------------
+
+@tree.command(name="referral", description="Get your unique invite link to earn points")
+async def referral(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    # Check database for existing code
+    if coll is not None:
+        doc = coll.find_one({"_id": user_id})
+        saved_code = doc.get("referral_code") if doc else None
+    else:
+        saved_code = load_data().get(user_id, {}).get("referral_code")
+
+    if saved_code:
+        # Check if the invite still exists in the guild
+        invites = await interaction.guild.invites()
+        if any(i.code == saved_code for i in invites):
+            await interaction.response.send_message(f"Your referral link: https://discord.gg/{saved_code}", ephemeral=True)
+            return
+
+    # Create new permanent invite if none exists or old one was deleted
+    invite = await interaction.channel.create_invite(max_age=0, max_uses=0, unique=True, reason=f"Referral for {interaction.user.name}")
+    
+    if coll is not None:
+        coll.update_one({"_id": user_id}, {"$set": {"referral_code": invite.code}}, upsert=True)
+    else:
+        data = load_data()
+        user = data.get(user_id, {})
+        user["referral_code"] = invite.code
+        data[user_id] = user
+        save_data(data)
+    
+    # Update cache
+    if interaction.guild.id not in invites_cache:
+        invites_cache[interaction.guild.id] = {}
+    invites_cache[interaction.guild.id][invite.code] = invite.uses
+
+    await interaction.response.send_message(f"Your unique referral link: {invite.url}", ephemeral=True)
+        
+        
+@tree.command(name="refremove", description="Remove a specific referral/invite code")
+@app_commands.describe(code="The invite code to remove")
+async def refremove(interaction: discord.Interaction, code: str):
+    if not has_permission(interaction.user):
+        await interaction.response.defer(ephemeral=True)
+    
+    try:
+        invite = await bot.fetch_invite(code)
+        if invite.guild.id != interaction.guild.id:
+            return await interaction.followup.send("That invite belongs to another server.")
+        
+        await invite.delete(reason=f"Removed by {interaction.user.name} via /refremove")
+        
+        # Clean from database
+        if profile_coll is not None:
+            profile_coll.update_one({"referral_code": code}, {"$unset": {"referral_code": ""}})
+        
+        await interaction.followup.send(f"✅ Successfully removed invite code: `{code}`")
+    except discord.NotFound:
+        await interaction.followup.send("❌ Invite code not found or already expired.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+@tree.command(name="reloadreferral", description="Create a new referral code (Points are kept)")
+async def reloadreferral(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    uid = str(interaction.user.id)
+    
+    # 1. Delete old invite if it exists
+    user_data = get_user_data(interaction.user.id)
+    old_code = user_data.get("referral_code")
+    
+    if old_code:
+        try:
+            invs = await interaction.guild.invites()
+            for i in invs:
+                if i.code == old_code:
+                    await i.delete(reason="User reloaded their referral link")
+        except: pass
+
+    # 2. Create new invite
+    invite = await interaction.channel.create_invite(max_age=0, max_uses=0, unique=True)
+    
+    # 3. Update Profile collection (Points are untouched because we use $set for code only)
+    if profile_coll is not None:
+        profile_coll.update_one({"_id": uid}, {"$set": {"referral_code": invite.code}}, upsert=True)
+    
+    # Update cache
+    invites_cache[interaction.guild.id][invite.code] = invite.uses
+    await interaction.followup.send(f"✅ New referral link generated: {invite.url}\n(Your points remain safe!)")
+    
+@tree.command(name="profile", description="Check stats")
+async def profile(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    uid = str(target.id)
+    
+    if coll is not None:
+        doc = coll.find_one({"_id": uid}) or {}
+        counts = doc.get("counts", {})
+        points = doc.get("points", 0)
+        warns = doc.get("warn_count", 0)
+    else:
+        data = load_data().get(uid, {})
+        counts = data.get("counts", {}) # Adjust based on your JSON structure
+        points = data.get("points", 0)
+        warns = data.get("warn_count", 0)
+
+    total_swears = sum(counts.values()) if isinstance(counts, dict) else 0
+
+    embed = discord.Embed(title=f"Profile: {target.display_name}", color=target.color)
+    embed.add_field(name="💰 Points", value=str(points))
+    embed.add_field(name="⚠️ Warnings", value=str(warns))
+    embed.add_field(name="🤬 Swears", value=str(total_swears))
+    await interaction.response.send_message(embed=embed)
+    
+@tree.command(name="givepoints", description="Give points to a user (Owner Only)")
+async def givepoints(interaction: discord.Interaction, user: discord.Member, value: int):
+    if not is_owner(interaction.user.id):
+        await interaction.response.send_message("❌ Access Denied.", ephemeral=True)
+        return
+
+    update_points(user.id, value)
+    await interaction.response.send_message(f"✅ Gave **{value}** points to {user.mention}.")
+
 @tree.command(name="report", description="Report a user with evidence")
 @discord.app_commands.describe(
     suspect="The user you are reporting",
@@ -776,24 +935,6 @@ async def clearcount(interaction: discord.Interaction, user: discord.Member, wor
             f"🧹 Cleared **all** swear records for {user.mention}.", 
             ephemeral=False
         )
-
-@tree.command(name="addstatus", description="Add a new status to the rotation")
-async def addstatus(interaction: discord.Interaction, text: str):
-    if not is_owner(interaction.user.id):
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    
-    if status_coll is not None:
-        status_coll.update_one({"_id": "status_list"}, {"$addToSet": {"messages": text}}, upsert=True)
-        await interaction.response.send_message(f"✅ Added status: `{text}`")
-
-@tree.command(name="clearstatuses", description="Wipe all custom statuses")
-async def clearstatuses(interaction: discord.Interaction):
-    if not is_owner(interaction.user.id):
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    
-    if status_coll is not None:
-        status_coll.delete_one({"_id": "status_list"})
-        await interaction.response.send_message("🧹 Status list cleared. Reverting to defaults.")
 
 async def send_warn_log(action, staff, user, reason=None, warn_id=None, extra=None):
     """Sends a formatted embed to the warning logs channel."""
@@ -958,6 +1099,29 @@ async def warnlist(interaction: discord.Interaction, user: discord.Member):
         )
 
     await interaction.response.send_message(embed=embed)
+    
+@tree.command(name="customrole", description="Create a custom role (Costs 50 Points)")
+@app_commands.describe(name="Role Name", color="Hex code (e.g. #ff0000)")
+async def customrole(interaction: discord.Interaction, name: str, color: str):
+    user_data = get_user_data(interaction.user.id)
+    points = user_data.get("points", 0)
+
+    if points < 50:
+        await interaction.response.send_message(f"❌ You need 50 points (Current: {points})", ephemeral=True)
+        return
+
+    try:
+        # Convert hex to discord color
+        clean_color = int(color.replace("#", ""), 16)
+        new_role = await interaction.guild.create_role(name=name, color=discord.Color(clean_color))
+        await interaction.user.add_roles(new_role)
+        
+        # Deduct Points
+        update_points(interaction.user.id, -50)
+        
+        await interaction.response.send_message(f"✅ Created role **{name}**! 50 points deducted.")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {e}. Ensure the color is a valid Hex code.", ephemeral=True)
 
 # ---------------- Message-based commands & scanning ----------------
 @bot.event
