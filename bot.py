@@ -77,8 +77,8 @@ try:
     from pymongo import MongoClient
     if MONGO_URI:
         client = MongoClient(MONGO_URI)
-        db = client.get_database(os.getenv("MONGO_DB", "bnf_bot"))
-        coll = db[os.getenv("MONGO_COLLECTION")]
+        db = client.get_database(os.getenv("MONGO_DB"))
+        coll = db["swear_counts"]
         print("Connected to MongoDB")
     else:
         coll = None
@@ -1068,8 +1068,8 @@ async def removewarning(interaction: discord.Interaction, user: discord.Member, 
         await interaction.response.send_message("❌ Staff only.", ephemeral=True)
         return
 
-    if coll is not None:
-        res = coll.update_one({"_id": str(user.id)}, {"$pull": {"warnings": {"warn_id": warning_id.upper()}}, "$inc": {"warn_count": -1}})
+    if profile_coll is not None:
+        res = profile_coll.update_one({"_id": str(user.id)}, {"$pull": {"warnings": {"warn_id": warning_id.upper()}}, "$inc": {"warn_count": -1}})
         if res.modified_count > 0:
             await send_warn_log("Warning Removed", interaction.user, user, warn_id=warning_id.upper())
             await interaction.response.send_message(f"🗑️ Removed warning **{warning_id}**.")
@@ -1082,8 +1082,8 @@ async def clearwarning(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True)
         return
 
-    if coll is not None:
-        coll.update_one({"_id": str(user.id)}, {"$set": {"warnings": [], "warn_count": 0}})
+    if profile_coll is not None:
+        profile_coll.update_one({"_id": str(user.id)}, {"$set": {"warnings": [], "warn_count": 0}})
         await send_warn_log("Warnings Cleared", interaction.user, user, extra="All warning data wiped.")
         await interaction.response.send_message(f"🧹 Cleared all records for {user.mention}.")
 
@@ -1094,11 +1094,11 @@ async def warnlist(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True)
         return
 
-    if coll is None:
+    if profile_coll is None:
         await interaction.response.send_message("❌ Database connection not available.", ephemeral=True)
         return
 
-    doc = coll.find_one({"_id": str(user.id)})
+    doc = profile_coll.find_one({"_id": str(user.id)})
     warnings = doc.get("warnings", []) if doc else []
 
     if not warnings:
