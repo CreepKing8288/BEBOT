@@ -371,14 +371,14 @@ class AppealActionView(discord.ui.View):
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Permission Check
-        if not any(role.id in [1458454264702832792, 1458455202892877988, 1458490049413906553, 1458456130195034251, 1458455703638376469] for role in interaction.user.roles):
+        # Use the AUTHORIZED_ROLES list defined at the top of your bot.py
+        if not any(role.id in AUTHORIZED_ROLES for role in interaction.user.roles):
             await interaction.response.send_message("❌ Staff only.", ephemeral=True)
             return
 
         # 1. Remove warning from MongoDB
-        if coll is not None:
-            coll.update_one(
+        if profile_coll is not None:
+            profile_coll.update_one(
                 {"_id": str(self.target_user.id)}, 
                 {"$pull": {"warnings": {"warn_id": self.warn_id}}, "$inc": {"warn_count": -1}}
             )
@@ -389,14 +389,36 @@ class AppealActionView(discord.ui.View):
         except discord.Forbidden:
             pass 
 
-        # 3. Update the log message so other staff know it's handled
+        # 3. Update the log message and REMOVE the buttons
         embed = interaction.message.embeds[0]
         embed.color = discord.Color.green()
         embed.add_field(name="Status", value=f"✅ Approved by {interaction.user.mention}", inline=False)
         
-        # Remove buttons so no one clicks again
+        # Setting view=None here deletes the buttons from the message
         await interaction.message.edit(embed=embed, view=None)
         await interaction.response.send_message(f"Successfully revoked warning {self.warn_id}.", ephemeral=True)
+
+    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Permission Check
+        if not any(role.id in AUTHORIZED_ROLES for role in interaction.user.roles):
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+
+        # 1. Notify the User (Rejected)
+        try:
+            await self.target_user.send(f"❌ Your appeal for warning **{self.warn_id}** has been **REJECTED**. This decision is final.")
+        except discord.Forbidden:
+            pass
+
+        # 2. Update the log message and REMOVE the buttons
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.red()
+        embed.add_field(name="Status", value=f"❌ Rejected by {interaction.user.mention}", inline=False)
+        
+        # Setting view=None here deletes the buttons from the message
+        await interaction.message.edit(embed=embed, view=None)
+        await interaction.response.send_message(f"Rejected appeal for {self.warn_id}.", ephemeral=True)
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
