@@ -1057,10 +1057,10 @@ async def rulewarning(interaction: discord.Interaction, user: discord.Member, ar
         # Send LOG
         await send_warn_log("Warning Issued", interaction.user, user, reason=section, warn_id=warn_id, extra=f"Total Warnings: {current_warns}\nPenalty: {penalty_text}")
         
-        await interaction.response.send_message(f"✅ Warning **{warn_id}** recorded. (Total: {current_warns})", ephemeral=True)
+        await interaction.followup.send(f"✅ Warning **{warn_id}** recorded. (Total: {current_warns})", ephemeral=True)
 
     except Exception as e:
-        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 @tree.command(name="removewarning", description="Remove a specific warning by ID")
 async def removewarning(interaction: discord.Interaction, user: discord.Member, warning_id: str):
