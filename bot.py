@@ -145,6 +145,7 @@ def save_data(data):
 if 'db' in globals() and db is not None:
     # Existing counts collection
     swear_words_coll = db["swear_counts"]
+    coll = swear_words_coll
     # NEW: Dedicated Profile collection for points and referral codes
     profile_coll = db["Profile"]
     # NEW: Tracker to prevent re-using referrals on rejoin
@@ -210,15 +211,15 @@ _swear_cache = None
 def init_swear_words():
     """Ensure swear words storage is seeded with defaults."""
     global _swear_cache
-    # Change 'swear_words_coll' to 'coll'
-    if coll is not None:
-        doc = coll.find_one({"_id": "words"})
+    if swear_words_coll is not None:
+        doc = swear_words_coll.find_one({"_id": "words"})
         if not doc:
-            coll.insert_one({"_id": "words", "words": DEFAULT_SWEAR_WORDS})
+            swear_words_coll.insert_one({"_id": "words", "words": DEFAULT_SWEAR_WORDS})
             _swear_cache = list(DEFAULT_SWEAR_WORDS)
             print("Seeded swear words in MongoDB")
         else:
             _swear_cache = list(doc.get("words", []))
+            print(f"Loaded {len(_swear_cache)} words from MongoDB")
     else:
         try:
             with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
@@ -234,23 +235,29 @@ def init_swear_words():
 def get_swear_words():
     """Return the current list of swear words (lowercase)."""
     global _swear_cache
+    
+    # If cache exists, use it
     if _swear_cache is not None:
         return _swear_cache
-    # Cache miss: load from source
+
+    # If MongoDB is connected
     if swear_words_coll is not None:
         doc = swear_words_coll.find_one({"_id": "words"})
-        words = doc.get("words", []) if doc else []
-        _swear_cache = list(words)
-        return _swear_cache
-    else:
-        try:
-            with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                _swear_cache = list(data.get("words", []))
-                return _swear_cache
-        except FileNotFoundError:
+        if doc and "words" in doc:
+            _swear_cache = list(doc["words"])
+        else:
             _swear_cache = list(DEFAULT_SWEAR_WORDS)
-            return _swear_cache
+        return _swear_cache
+    
+    # Local JSON Fallback
+    try:
+        with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            _swear_cache = list(data.get("words", DEFAULT_SWEAR_WORDS))
+    except FileNotFoundError:
+        _swear_cache = list(DEFAULT_SWEAR_WORDS)
+        
+    return _swear_cache
 
 def add_swear_word(word: str):
     word = word.lower()
