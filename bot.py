@@ -78,7 +78,7 @@ try:
     if MONGO_URI:
         client = MongoClient(MONGO_URI)
         db = client.get_database(os.getenv("MONGO_DB"))
-        coll = db[os.getenv("MONGO_COLLECTION")]
+        coll = db["swear_counts"]
         print("Connected to MongoDB")
     else:
         coll = None
@@ -144,7 +144,7 @@ def save_data(data):
 # Swear words storage (MongoDB collection or local JSON fallback)
 if 'db' in globals() and db is not None:
     # Existing counts collection
-    swear_words_coll = db[os.getenv("MONGO_COLLECTION")]
+    swear_words_coll = db[os.getenv("MONGO_COLLECTION", "swear_counts")]
     # NEW: Dedicated Profile collection for points and referral codes
     profile_coll = db["Profile"]
     # NEW: Tracker to prevent re-using referrals on rejoin
@@ -557,8 +557,8 @@ def get_user_data(user_id: int):
 def update_points(user_id: int, amount: int):
     """Adds or subtracts points for a user."""
     uid = str(user_id)
-    if coll is not None:
-        coll.update_one({"_id": uid}, {"$inc": {"points": amount}}, upsert=True)
+    if profile_coll is not None:
+        profile_coll.update_one({"_id": uid}, {"$inc": {"points": amount}}, upsert=True)
     else:
         data = load_data()
         user = data.get(uid, {})
@@ -568,8 +568,8 @@ def update_points(user_id: int, amount: int):
 
 def get_inviter_by_code(code: str):
     """Finds the user ID associated with a custom referral code."""
-    if coll is not None:
-        doc = coll.find_one({"referral_code": code})
+    if profile_coll is not None:
+        doc = profile_coll.find_one({"referral_code": code})
         return int(doc["_id"]) if doc else None
     else:
         data = load_data()
@@ -697,8 +697,8 @@ def get_leaderboard(guild, limit=10):
 async def referral(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     # Check database for existing code
-    if coll is not None:
-        doc = coll.find_one({"_id": user_id})
+    if profile_coll is not None:
+        doc = profile_coll.find_one({"_id": user_id})
         saved_code = doc.get("referral_code") if doc else None
     else:
         saved_code = load_data().get(user_id, {}).get("referral_code")
@@ -713,8 +713,8 @@ async def referral(interaction: discord.Interaction):
     # Create new permanent invite if none exists or old one was deleted
     invite = await interaction.channel.create_invite(max_age=0, max_uses=0, unique=True, reason=f"Referral for {interaction.user.name}")
     
-    if coll is not None:
-        coll.update_one({"_id": user_id}, {"$set": {"referral_code": invite.code}}, upsert=True)
+    if profile_coll is not None:
+        profile_coll.update_one({"_id": user_id}, {"$set": {"referral_code": invite.code}}, upsert=True)
     else:
         data = load_data()
         user = data.get(user_id, {})
@@ -786,23 +786,25 @@ async def profile(interaction: discord.Interaction, user: discord.Member = None)
     target = user or interaction.user
     uid = str(target.id)
     
-    if coll is not None:
-        doc = coll.find_one({"_id": uid}) or {}
-        counts = doc.get("counts", {})
-        points = doc.get("points", 0)
-        warns = doc.get("warn_count", 0)
-    else:
-        data = load_data().get(uid, {})
-        counts = data.get("counts", {}) # Adjust based on your JSON structure
-        points = data.get("points", 0)
-        warns = data.get("warn_count", 0)
-
+    swear_doc = coll.find_one({"_id": uid}) or {}
+    counts = swear_doc.get("counts", {})
     total_swears = sum(counts.values()) if isinstance(counts, dict) else 0
 
-    embed = discord.Embed(title=f"Profile: {target.display_name}", color=target.color)
-    embed.add_field(name="💰 Points", value=str(points))
-    embed.add_field(name="⚠️ Warnings", value=str(warns))
-    embed.add_field(name="🤬 Swears", value=str(total_swears))
+    profile_doc = profile_coll.find_one({"_id": uid}) or {}
+    points = profile_doc.get("points", 0)
+    warns = profile_doc.get("warn_count", 0)
+
+    embed = discord.Embed(
+        title=f"Profile: {target.display_name}", 
+        color=target.color,
+        timestamp=interaction.created_at
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    
+    embed.add_field(name="💰 Points", value=f"`{points}`", inline=True)
+    embed.add_field(name="⚠️ Warnings", value=f"`{warns}`", inline=True)
+    embed.add_field(name="🤬 Total Swears", value=f"`{total_swears}`", inline=True)
+    
     await interaction.response.send_message(embed=embed)
     
 @tree.command(name="givepoints", description="Give points to a user (Owner Only)")
