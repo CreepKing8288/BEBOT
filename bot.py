@@ -78,7 +78,7 @@ try:
     if MONGO_URI:
         client = MongoClient(MONGO_URI)
         db = client.get_database(os.getenv("MONGO_DB"))
-        coll = db["swear_counts"]
+        coll = db[os.getenv("MONGO_COLLECTION")]
         print("Connected to MongoDB")
     else:
         coll = None
