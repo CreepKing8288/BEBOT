@@ -78,7 +78,7 @@ try:
     if MONGO_URI:
         client = MongoClient(MONGO_URI)
         db = client.get_database(os.getenv("MONGO_DB"))
-        coll = db[os.getenv("MONGO_COLLECTION", "swear_counts")]
+        coll = db[os.getenv("MONGO_COLLECTION")]
         print("Connected to MongoDB")
     else:
         coll = None
@@ -149,6 +149,7 @@ if 'db' in globals() and db is not None:
     profile_coll = db["Profile"]
     # NEW: Tracker to prevent re-using referrals on rejoin
     ref_tracker_coll = db["ReferralTracker"] 
+    
 else:
     profile_coll = None
     ref_tracker_coll = None
@@ -993,9 +994,9 @@ async def rulewarning(interaction: discord.Interaction, user: discord.Member, ar
 
     try:
         current_warns = 0
-        if coll is not None:
+        if profile_coll is not None:
             warn_entry = {"warn_id": warn_id, "reason": section, "staff": str(interaction.user.id), "timestamp": datetime.utcnow()}
-            res = coll.find_one_and_update({"_id": str(user.id)}, {"$push": {"warnings": warn_entry}, "$inc": {"warn_count": 1}}, upsert=True, return_document=True)
+            res = profile_coll.find_one_and_update({"_id": str(user.id)}, {"$push": {"warnings": warn_entry}, "$inc": {"warn_count": 1}}, upsert=True, return_document=True)
             current_warns = res.get("warn_count", 0)
 
         # Punishment Logic
