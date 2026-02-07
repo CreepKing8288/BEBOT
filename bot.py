@@ -144,8 +144,8 @@ def save_data(data):
 # Swear words storage (MongoDB collection or local JSON fallback)
 if 'db' in globals() and db is not None:
     # Existing counts collection
-    swear_words_coll = db["swear_counts"]
-    coll = swear_words_coll
+    swear_words_coll = db["swear_words"]
+    coll = db["swear_counts"]
     # NEW: Dedicated Profile collection for points and referral codes
     profile_coll = db["Profile"]
     # NEW: Tracker to prevent re-using referrals on rejoin
@@ -209,94 +209,49 @@ async def before_change_status():
 _swear_cache = None
 
 def init_swear_words():
-    """Ensure swear words storage is seeded with defaults."""
     global _swear_cache
     if swear_words_coll is not None:
         doc = swear_words_coll.find_one({"_id": "words"})
-        if not doc:
+        if doc:
+            _swear_cache = list(doc.get("words", []))
+            print(f"✅ Successfully loaded {len(_swear_cache)} words from MongoDB.")
+        else:
             swear_words_coll.insert_one({"_id": "words", "words": DEFAULT_SWEAR_WORDS})
             _swear_cache = list(DEFAULT_SWEAR_WORDS)
-            print("Seeded swear words in MongoDB")
-        else:
-            _swear_cache = list(doc.get("words", []))
-            print(f"Loaded {len(_swear_cache)} words from MongoDB")
-    else:
-        try:
-            with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                _swear_cache = list(data.get("words", DEFAULT_SWEAR_WORDS))
-        except FileNotFoundError:
-            with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"words": DEFAULT_SWEAR_WORDS}, f, ensure_ascii=False, indent=2)
-            _swear_cache = list(DEFAULT_SWEAR_WORDS)
-            print("Seeded local swear words file")
 
 
 def get_swear_words():
-    """Return the current list of swear words (lowercase)."""
     global _swear_cache
-    
-    # If cache exists, use it
+    # Only use cache if it's not empty
     if _swear_cache is not None:
         return _swear_cache
 
-    # If MongoDB is connected
     if swear_words_coll is not None:
         doc = swear_words_coll.find_one({"_id": "words"})
         if doc and "words" in doc:
             _swear_cache = list(doc["words"])
-        else:
-            _swear_cache = list(DEFAULT_SWEAR_WORDS)
-        return _swear_cache
+            return _swear_cache
     
-    # Local JSON Fallback
-    try:
-        with open(SWEAR_WORDS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            _swear_cache = list(data.get("words", DEFAULT_SWEAR_WORDS))
-    except FileNotFoundError:
-        _swear_cache = list(DEFAULT_SWEAR_WORDS)
-        
-    return _swear_cache
+    return list(DEFAULT_SWEAR_WORDS)
 
 def add_swear_word(word: str):
     word = word.lower()
     global _swear_cache
     if swear_words_coll is not None:
-        res = swear_words_coll.update_one({"_id": "words"}, {"$addToSet": {"words": word}}, upsert=True)
-        # refresh cache
-        _swear_cache = None
-        get_swear_words()
+        # Pushes to the "words" array inside the "words" document
+        swear_words_coll.update_one({"_id": "words"}, {"$addToSet": {"words": word}}, upsert=True)
+        _swear_cache = None # Clear cache to force a refresh
         return True
-    else:
-        words = get_swear_words()
-        if word in words:
-            return False
-        words.append(word)
-        with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"words": words}, f, ensure_ascii=False, indent=2)
-        _swear_cache = None
-        get_swear_words()
-        return True
+    return False
 
 def remove_swear_word(word: str):
     word = word.lower()
     global _swear_cache
     if swear_words_coll is not None:
-        res = swear_words_coll.update_one({"_id": "words"}, {"$pull": {"words": word}})
-        _swear_cache = None
-        get_swear_words()
+        swear_words_coll.update_one({"_id": "words"}, {"$pull": {"words": word}})
+        _swear_cache = None # Clear cache to force a refresh
         return True
-    else:
-        words = get_swear_words()
-        if word not in words:
-            return False
-        words = [w for w in words if w != word]
-        with open(SWEAR_WORDS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"words": words}, f, ensure_ascii=False, indent=2)
-        _swear_cache = None
-        get_swear_words()
-        return True
+    return False
 
 def clear_user_data(user: discord.User, word: str = None):
     """Clears all counts or a specific word for a user in DB or JSON."""
