@@ -77,8 +77,8 @@ try:
     from pymongo import MongoClient
     if MONGO_URI:
         client = MongoClient(MONGO_URI)
-        db = client.get_database(os.getenv("MONGO_DB"))
-        coll = db["swear_counts"]
+        db = client.get_database(os.getenv("MONGO_DB", "bnf_bot"))
+        coll = db[os.getenv("MONGO_COLLECTION")]
         print("Connected to MongoDB")
     else:
         coll = None
@@ -144,7 +144,7 @@ def save_data(data):
 # Swear words storage (MongoDB collection or local JSON fallback)
 if 'db' in globals() and db is not None:
     # Existing counts collection
-    swear_words_coll = db[os.getenv("MONGO_COLLECTION", "swear_counts")]
+    swear_words_coll = db["swear_counts"]
     # NEW: Dedicated Profile collection for points and referral codes
     profile_coll = db["Profile"]
     # NEW: Tracker to prevent re-using referrals on rejoin
@@ -548,8 +548,8 @@ async def on_member_join(member):
 def get_user_data(user_id: int):
     """Fetch full user document."""
     uid = str(user_id)
-    if coll is not None:
-        doc = coll.find_one({"_id": uid})
+    if profile_coll is not None:
+        doc = profile_coll.find_one({"_id": uid})
         return doc if doc else {}
     else:
         return load_data().get(uid, {})
