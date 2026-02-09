@@ -4,11 +4,12 @@ import json
 import re
 import time
 import asyncio
+import random
 from collections import Counter
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord import app_commands
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from discord.ext import tasks
 
 
@@ -51,6 +52,7 @@ REPORT_CHANNEL_ID = 1468224442089079071
 WARN_LOG_CHANNEL_ID = 1469023340130861179
 INVITE_LOG_CHANNEL_ID = 1469126718425006332
 LOG_CHANNEL_ID = 1469332387539325044
+GIVEAWAY_ANNOUNCE_ID = 1470011065910689985
 
 # Authorized Role IDs
 AUTHORIZED_ROLES = [
@@ -148,6 +150,7 @@ if 'db' in globals() and db is not None:
     coll = db["swear_counts"]
     # NEW: Dedicated Profile collection for points and referral codes
     profile_coll = db["Profile"]
+    giveaway_coll = db["giveaways"]
     # NEW: Tracker to prevent re-using referrals on rejoin
     ref_tracker_coll = db["ReferralTracker"] 
     
@@ -201,6 +204,34 @@ async def change_status():
         await bot.change_presence(activity=discord.Game(name=msg))
         await asyncio.sleep(30) # Wait 30 seconds before switching to the next message
 
+@tasks.loop(seconds=30)
+async def check_giveaways():
+    if giveaway_coll is None: return
+    
+    now = datetime.now(timezone.utc)
+    expired = giveaway_coll.find({"active": True, "end_time": {"$lte": now}})
+    
+    for data in expired:
+        channel = bot.get_channel(data["channel_id"])
+        
+        # 1. Remove the button from the original message
+        try:
+            msg = await channel.fetch_message(data["message_id"])
+            # setting view=None removes the button forever
+            await msg.edit(view=None) 
+        except: pass
+
+        # 2. Pick Winners
+        entries = data.get("entries", [])
+        if not entries:
+            await channel.send(f"⚠️ Giveaway for **{data['title']}** ended with no entries.")
+        else:
+            winners = random.sample(entries, min(len(entries), data["winners"]))
+            mentions = ", ".join([f"<@{w}>" for w in winners])
+            await channel.send(f"🎊 **{data['title']}** Winners: {mentions}! (Total entries: {len(entries)})")
+
+        giveaway_coll.update_one({"_id": data["_id"]}, {"$set": {"active": False}})
+        
 @change_status.before_loop
 async def before_change_status():
     await bot.wait_until_ready()
@@ -403,6 +434,34 @@ class AppealActionView(discord.ui.View):
         await interaction.message.edit(embed=embed, view=None)
         await interaction.response.send_message(f"Rejected appeal for {self.warn_id}.", ephemeral=True)
 
+# --- Giveaway UI ---
+class GiveawayView(discord.ui.View):
+    def __init__(self, giveaway_id):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+
+    @discord.ui.button(label="Enter Giveaway", style=discord.ButtonStyle.primary, emoji="🎉", custom_id="enter_giveaway")
+    async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if giveaway_coll is None: return
+        
+        data = giveaway_coll.find_one_and_update(
+            {"_id": self.giveaway_id, "active": True},
+            {"$addToSet": {"entries": interaction.user.id}},
+            return_document=True
+        )
+        
+        if not data:
+            await interaction.response.send_message("❌ This giveaway has already ended.", ephemeral=True)
+            return
+
+        embed = interaction.message.embeds[0]
+        # Regex update to match the new "Entry:" format
+        new_desc = re.sub(r"\*\*Entry:\*\* \d+", f"**Entry:** {len(data['entries'])}", embed.description)
+        embed.description = new_desc
+        
+        await interaction.message.edit(embed=embed)
+        await interaction.response.send_message("✅ Entry confirmed!", ephemeral=True)
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
@@ -543,39 +602,39 @@ def get_inviter_by_code(code: str):
 # ---------------- Swear tracking helpers ----------------
 
 def scan_text(content: str):
-    """Scan text for swears while preventing false positives in larger words."""
-    s = content.lower()
+    """Scan text for swears with leetspeak and bypass protection while avoiding false positives."""
     found = {}
     words = get_swear_words()
+    
+    # 1. Map leetspeak and common bypass characters
+    leetspeak_map = {
+        '3': 'e', '4': 'a', '@': 'a', '1': 'i', '!': 'i', 
+        '0': 'o', '5': 's', '$': 's', '7': 't', '(': 'i', ')': 'i'
+    }
+    
+    # 2. Pre-process the message: normalize leetspeak
+    normalized_content = content.lower()
+    for char, replacement in leetspeak_map.items():
+        normalized_content = normalized_content.replace(char, replacement)
 
     for w in words:
-        # 1. Create a fuzzy pattern:
-        # Each letter can be repeated: '+'
-        # Each letter can be separated by spaces or symbols: '[\W_]*'
-        # Example for 'utin': u+[\W_]*t+[\W_]*i+[\W_]*n+
-        pattern = " ".join([re.escape(char) + "+" for char in w]).replace(" ", r"[\W_]*")
-
-        # 2. Use word boundaries (\b) to ensure 'utin' isn't caught inside 'kakalikutin'
-        # This allows "u t i n" but ignores "kakalikutin"
-        regex = r"\b" + pattern + r"\b"
+        # 3. Create a pattern that allows:
+        # - Any number of repeated letters (f+u+c+k+)
+        # - Optional spaces or symbols between letters (f[ \W]*u...)
+        # - MUST be surrounded by word boundaries \b to avoid "kutkutin"/ "inaka"
         
-        matches = re.findall(regex, s, flags=re.IGNORECASE)
-
-        # 3. Fallback: If no matches with boundaries, check for the "spaced out" bypass 
-        # but ONLY if the word is long enough to be unique (e.g., > 3 letters)
-        if not matches and len(w) > 3:
-            # Remove all non-alpha and check if the word exists standalone
-            clean_content = re.sub(r'[^a-zA-Z]', '', s)
-            if w in clean_content:
-                # Still verify this isn't just a substring of the original content
-                if w not in s.replace(" ", ""):
-                   matches = [w] 
-
-        count = len(matches)
-        if count > 0:
-            found[w] = count
+        # Build the regex: e.g., for "gago" -> \bg+[ \W]*a+[ \W]*g+[ \W]*o+\b
+        pattern_parts = [re.escape(char) + "+" for char in w]
+        # [\s\W]* allows spaces, dots, or symbols between letters
+        regex_string = r"\b" + r"[\s\W]*".join(pattern_parts) + r"\b"
+        
+        matches = re.findall(regex_string, normalized_content, flags=re.IGNORECASE)
+        
+        if matches:
+            found[w] = len(matches)
             
     return found
+
 
 def record_swears(message: discord.Message):
     """Scan the message for swear words and update storage (MongoDB or local JSON).
@@ -1125,6 +1184,154 @@ async def customrole(interaction: discord.Interaction, name: str, color: str):
     except Exception as e:
         await interaction.response.send_message(f"❌ Error: {e}. Ensure the color is a valid Hex code.", ephemeral=True)
 
+# --- Giveaway Commands ---
+@tree.command(name="giveaway_create", description="Start a giveaway with a specific duration")
+@app_commands.describe(duration="Time in minutes (e.g., 1 for one minute)")
+async def giveaway_create(interaction: discord.Interaction, title: str, description: str, winners: int, duration: int):
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    giveaway_id = hex(int(time.time()))[2:].upper()
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=duration)
+    ts = int(end_time.timestamp())
+    
+    # Updated Embed Formatting
+    embed = discord.Embed(
+        title=title,
+        description=f"{description}\n\n"
+                    f"**Ends:** <t:{ts}:R> : <t:{ts}:f>\n"
+                    f"**Host By:** {interaction.user.mention}\n"
+                    f"**Entry:** 0\n"
+                    f"**Winner:** {winners}",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text=f"ID: {giveaway_id}")
+
+    announce_channel = bot.get_channel(GIVEAWAY_ANNOUNCE_ID)
+    view = GiveawayView(giveaway_id)
+    msg = await announce_channel.send(embed=embed, view=view)
+
+    giveaway_coll.insert_one({
+        "_id": giveaway_id,
+        "title": title,
+        "winners": winners,
+        "entries": [],
+        "active": True,
+        "end_time": end_time,
+        "channel_id": announce_channel.id,
+        "message_id": msg.id
+    })
+    
+    await interaction.response.send_message(f"✅ Started! ID: `{giveaway_id}`", ephemeral=True)
+
+@tree.command(name="giveaway_end", description="End a giveaway and pick winners")
+@app_commands.describe(giveaway_id="The ID of the giveaway to end")
+async def giveaway_end(interaction: discord.Interaction, giveaway_id: str):
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    data = giveaway_coll.find_one({"_id": giveaway_id.upper(), "active": True})
+    if not data:
+        await interaction.response.send_message("❌ Giveaway not found or already ended.", ephemeral=True)
+        return
+
+    entries = data.get("entries", [])
+    winner_count = data.get("winners", 1)
+    
+    if not entries:
+        await interaction.response.send_message(f"No one entered the giveaway `{giveaway_id}`.", ephemeral=True)
+        giveaway_coll.update_one({"_id": giveaway_id.upper()}, {"$set": {"active": False}})
+        return
+
+    # Pick random winners
+    winners = random.sample(entries, min(len(entries), winner_count))
+    winner_mentions = ", ".join([f"<@{w}>" for w in winners])
+
+    # Announce
+    channel = bot.get_channel(GIVEAWAY_ANNOUNCE_ID)
+    if channel:
+        await channel.send(f"🎊 Congratulations {winner_mentions}! You won the **{data['title']}**! (ID: `{giveaway_id.upper()}`)")
+
+    giveaway_coll.update_one({"_id": giveaway_id.upper()}, {"$set": {"active": False, "winners_list": winners}})
+    await interaction.response.send_message(f"✅ Giveaway `{giveaway_id}` ended and winners announced.", ephemeral=True)
+
+@tree.command(name="giveaway_cancel", description="Cancel a giveaway without picking winners")
+@app_commands.describe(giveaway_id="The ID of the giveaway to cancel")
+async def giveaway_cancel(interaction: discord.Interaction, giveaway_id: str):
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    res = giveaway_coll.delete_one({"_id": giveaway_id.upper()})
+    if res.deleted_count > 0:
+        await interaction.response.send_message(f"🚫 Giveaway `{giveaway_id.upper()}` has been cancelled and deleted.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Giveaway ID not found.", ephemeral=True)
+
+@tree.command(name="giveaway_reroll", description="Pick a new winner from an existing giveaway")
+@app_commands.describe(giveaway_id="The ID of the giveaway to reroll")
+async def giveaway_reroll(interaction: discord.Interaction, giveaway_id: str):
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    data = giveaway_coll.find_one({"_id": giveaway_id.upper()})
+    if not data or not data.get("entries"):
+        await interaction.response.send_message("❌ Giveaway not found or has no entries.", ephemeral=True)
+        return
+
+    new_winner = random.choice(data["entries"])
+    channel = bot.get_channel(GIVEAWAY_ANNOUNCE_ID)
+    
+    if channel:
+        await channel.send(f"🔄 **Reroll:** The new winner for **{data['title']}** is <@{new_winner}>!")
+    
+    await interaction.response.send_message(f"✅ Rerolled winner for `{giveaway_id.upper()}`.", ephemeral=True)
+
+@tree.command(name="joinvc", description="Make the bot join a specific voice channel")
+@app_commands.describe(channel_id="The ID of the voice channel to join")
+async def joinvc(interaction: discord.Interaction, channel_id: str):
+    # Permission Check
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    try:
+        # Convert string ID to int and fetch the channel
+        target_channel = interaction.guild.get_channel(int(channel_id))
+        
+        if not target_channel or not isinstance(target_channel, discord.VoiceChannel):
+            await interaction.response.send_message("❌ Invalid Voice Channel ID.", ephemeral=True)
+            return
+
+        # Check if already connected to a voice channel in this guild
+        if interaction.guild.voice_client:
+            await interaction.guild.voice_client.move_to(target_channel)
+        else:
+            await target_channel.connect()
+
+        await interaction.response.send_message(f"✅ Joined **{target_channel.name}**.")
+
+    except ValueError:
+        await interaction.response.send_message("❌ Please provide a numeric ID.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+
+@tree.command(name="leavevc", description="Make the bot leave the voice channel")
+async def leavevc(interaction: discord.Interaction):
+    # Permission Check
+    if not has_permission(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    if interaction.guild.voice_client:
+        await interaction.guild.voice_client.disconnect()
+        await interaction.response.send_message("✅ Successfully disconnected from the voice channel.")
+    else:
+        await interaction.response.send_message("❌ I am not connected to any voice channel.", ephemeral=True)
+        
 # ---------------- Message-based commands & scanning ----------------
 @bot.event
 async def on_message(message):
@@ -1316,26 +1523,22 @@ async def on_voice_state_update(member, before, after):
     embed = discord.Embed(timestamp=datetime.utcnow())
     embed.set_author(name=f"{member.name}#{member.discriminator}", icon_url=member.display_avatar.url)
 
-    # User Joined VC
     if before.channel is None and after.channel is not None:
         embed.title = "🔊 Joined Voice Channel"
         embed.color = discord.Color.green()
         embed.description = f"{member.mention} joined **{after.channel.name}**"
     
-    # User Left VC
     elif before.channel is not None and after.channel is None:
         embed.title = "🔇 Left Voice Channel"
         embed.color = discord.Color.red()
         embed.description = f"{member.mention} left **{before.channel.name}**"
     
-    # User Switched VC
     elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
         embed.title = "↔️ Switched Voice Channel"
         embed.color = discord.Color.gold()
         embed.description = f"{member.mention} moved from **{before.channel.name}** to **{after.channel.name}**"
     
     else:
-        # Ignore mute/deafen updates
         return
 
     await channel.send(embed=embed)
