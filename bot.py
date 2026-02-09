@@ -543,39 +543,39 @@ def get_inviter_by_code(code: str):
 # ---------------- Swear tracking helpers ----------------
 
 def scan_text(content: str):
-    """Scan arbitrary text for tracked swear words, handling spaces, symbols, and repeated letters."""
-    # 1. Standardize: lowercase and remove common bypass characters (spaces, dots, parens, etc.)
-    # This turns "g a g o" or "g.a.g.o" into "gago"
-    clean_content = re.sub(r'[^a-zA-Z]', '', content.lower())
-    
-    # 2. Also keep the original text but lowercase for standard word-boundary checks
-    original_lower = content.lower()
-    
+    """Scan text for swears while preventing false positives in larger words."""
+    s = content.lower()
     found = {}
     words = get_swear_words()
 
     for w in words:
-        # --- Strategy A: Detect "Cleaned" Bypasses (g a g o) ---
-        # We check if the target word exists inside the string that has no spaces/symbols
-        if w in clean_content:
-            # We count it as 1 per message found this way to avoid over-counting 
-            # while catching the bypass
-            found[w] = found.get(w, 0) + 1
-            continue # Move to next word if already caught
+        # 1. Create a fuzzy pattern:
+        # Each letter can be repeated: '+'
+        # Each letter can be separated by spaces or symbols: '[\W_]*'
+        # Example for 'utin': u+[\W_]*t+[\W_]*i+[\W_]*n+
+        pattern = " ".join([re.escape(char) + "+" for char in w]).replace(" ", r"[\W_]*")
 
-        # --- Strategy B: Standard Regex for Repeated Letters (f u u u u c k) ---
-        # Only runs if Strategy A didn't catch a "spaced out" version
-        pattern = "".join([re.escape(char) + r"[\W_]*" for char in w])
+        # 2. Use word boundaries (\b) to ensure 'utin' isn't caught inside 'kakalikutin'
+        # This allows "u t i n" but ignores "kakalikutin"
+        regex = r"\b" + pattern + r"\b"
         
-        # This matches "f u c k", "f.u.c.k", "f_u_c_k", etc.
-        matches = re.findall(pattern, original_lower, flags=re.IGNORECASE)
+        matches = re.findall(regex, s, flags=re.IGNORECASE)
 
-        c = len(matches)
-        if c > 0:
-            found[w] = found.get(w, 0) + c
+        # 3. Fallback: If no matches with boundaries, check for the "spaced out" bypass 
+        # but ONLY if the word is long enough to be unique (e.g., > 3 letters)
+        if not matches and len(w) > 3:
+            # Remove all non-alpha and check if the word exists standalone
+            clean_content = re.sub(r'[^a-zA-Z]', '', s)
+            if w in clean_content:
+                # Still verify this isn't just a substring of the original content
+                if w not in s.replace(" ", ""):
+                   matches = [w] 
+
+        count = len(matches)
+        if count > 0:
+            found[w] = count
             
     return found
-
 
 def record_swears(message: discord.Message):
     """Scan the message for swear words and update storage (MongoDB or local JSON).
