@@ -543,22 +543,37 @@ def get_inviter_by_code(code: str):
 # ---------------- Swear tracking helpers ----------------
 
 def scan_text(content: str):
-    """Scan arbitrary text for tracked swear words, allowing for repeated letters."""
-    s = content.lower()
+    """Scan arbitrary text for tracked swear words, handling spaces, symbols, and repeated letters."""
+    # 1. Standardize: lowercase and remove common bypass characters (spaces, dots, parens, etc.)
+    # This turns "g a g o" or "g.a.g.o" into "gago"
+    clean_content = re.sub(r'[^a-zA-Z]', '', content.lower())
+    
+    # 2. Also keep the original text but lowercase for standard word-boundary checks
+    original_lower = content.lower()
+    
     found = {}
     words = get_swear_words()
-    
+
     for w in words:
-        # Create a pattern where each letter can be repeated: 'f+u+c+k+'
-        # This catches 'fuck', 'fuuuuuck', 'fuckkkkk', etc.
-        pattern = "".join([re.escape(char) + "+" for char in w])
+        # --- Strategy A: Detect "Cleaned" Bypasses (g a g o) ---
+        # We check if the target word exists inside the string that has no spaces/symbols
+        if w in clean_content:
+            # We count it as 1 per message found this way to avoid over-counting 
+            # while catching the bypass
+            found[w] = found.get(w, 0) + 1
+            continue # Move to next word if already caught
+
+        # --- Strategy B: Standard Regex for Repeated Letters (f u u u u c k) ---
+        # Only runs if Strategy A didn't catch a "spaced out" version
+        pattern = "".join([re.escape(char) + r"[\W_]*" for char in w])
         
-        # Use \b to ensure it's still treated as a word (won't catch 'refucking' unless intended)
-        matches = re.findall(r"\b" + pattern + r"\b", s, flags=re.IGNORECASE)
-        
+        # This matches "f u c k", "f.u.c.k", "f_u_c_k", etc.
+        matches = re.findall(pattern, original_lower, flags=re.IGNORECASE)
+
         c = len(matches)
         if c > 0:
-            found[w] = c
+            found[w] = found.get(w, 0) + c
+            
     return found
 
 
