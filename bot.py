@@ -102,23 +102,30 @@ RULES_DATA = {
         "2.1 Channel Clarity": "Use channels for their intended purpose (e.g., memes in #memes).",
         "2.2 Ping Policy": "Do not use @everyone or @here without a valid reason or staff permission.",
         "2.3 VC Etiquette": "No ear-rape, screaming, or excessive noise. Use Push-to-Talk if needed.",
-        "2.4 Advertising": "No Unauthorized Advertising: Do not post server invites or social media links without staff approval."
+        "2.4 Advertising": "No Unauthorized Advertising: Do not post server invites, social media links, or 'DM me for work' without staff approval.",
+        "2.5 Spamming": "Spamming chats for swear counts and spamming nonsense in the middle of conversation."
     },
-    "ARTICLE 3: Safety & Integrity": {
-        "3.1 Age Limit": "Users must be 13+ (or 18+ for adult-designated servers).",
+    "ARTICLE 3: Safety & Platform Integrity": {
+        "3.1 Age Limit": "Users must be 16+ (or 18+ for adult-designated servers).",
         "3.2 NSFW Content": "Forbidden in public areas; only allowed in age-restricted channels.",
         "3.3 Anti-Scam": "Sharing 'Free Nitro' links or suspicious downloads results in an instant ban.",
         "3.4 No Ban Evasion": "Using alternate accounts to bypass bans or timeouts is prohibited.",
         "3.5 Consent First": "Never share a friend's real name, location, or photo without permission.",
-        "3.6 Common Sense": "Just because something isn't explicitly written doesn't mean it’s allowed."
+        "3.6 Common Sense": "Just because something isn't explicitly written doesn't mean it’s allowed. Use common sense and don't try to 'skirt the rules.'"
     },
     "ARTICLE 4: Admin Authority": {
-        "4.1 Staff Discretion": "Moderators have the final say on behavior not explicitly listed.",
-        "4.2 Conflict of Interest": "Staff must recuse themselves from cases involving close friends.",
-        "4.3 Evidence-Based": "All bans and kicks must be backed by logged evidence.",
-        "4.4 Internal Privacy": "Staff-room discussions are strictly confidential.",
-        "4.5 Transparency": "Staff must clearly cite the rule violated when taking action.",
-        "4.6 Power Tripping": "Avoid using staff-only permissions for jokes or to win arguments."
+        "4.1 Staff Discretion": "Moderators have the final say on behavior not explicitly listed. Rules are guidelines, not loopholes.",
+        "4.2 Conflict of Interest": "Staff must recuse themselves from cases involving close friends or personal rivals to ensure fairness.",
+        "4.3 Evidence-Based Action": "All bans and kicks must be backed by logged evidence (screenshots/context) to prevent 'he-said-she-said' scenarios.",
+        "4.4 Internal Privacy": "Staff-room discussions are strictly confidential. Sharing internal logs with members is a tier-1 offense.",
+        "4.5 Staff Transparency": "Staff must clearly cite the rule violated when taking action. While staff aim to be patient and de-escalate, repeated defiance will result in immediate sanctions.",
+        "4.6 No Power Tripping": "Avoid using staff-only permissions for jokes or to win arguments. This includes unnecessary nicknaming, muting for fun, or ghost-pinging."
+    },
+    "ARTICLE 5: Moderation & Sanctions": {
+        "5.1 Sanctions": "Violations may result in warnings, restrictions, removal, or permanent bans. We generally follow a Warning → Timeout → Kick → Ban progression, but staff may skip steps for severe violations.",
+        "5.2 Appeals": "If you believe a sanction was unfair, please contact an Admin via DM to discuss the situation calmly.",
+        "5.3 Reporting": "If you witness a rule violation, please contact Staff or use the /report command. Include evidence (screenshots/context).",
+        "5.4 No Mini-Modding": "Please do not attempt to enforce the rules yourself. Report the incident and let the Staff handle the situation."
     }
 }
 
