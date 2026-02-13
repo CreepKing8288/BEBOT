@@ -120,12 +120,6 @@ RULES_DATA = {
         "4.4 Internal Privacy": "Staff-room discussions are strictly confidential. Sharing internal logs with members is a tier-1 offense.",
         "4.5 Staff Transparency": "Staff must clearly cite the rule violated when taking action. While staff aim to be patient and de-escalate, repeated defiance will result in immediate sanctions.",
         "4.6 No Power Tripping": "Avoid using staff-only permissions for jokes or to win arguments. This includes unnecessary nicknaming, muting for fun, or ghost-pinging."
-    },
-    "ARTICLE 5: Moderation & Sanctions": {
-        "5.1 Sanctions": "Violations may result in warnings, restrictions, removal, or permanent bans. We generally follow a Warning → Timeout → Kick → Ban progression, but staff may skip steps for severe violations.",
-        "5.2 Appeals": "If you believe a sanction was unfair, please contact an Admin via DM to discuss the situation calmly.",
-        "5.3 Reporting": "If you witness a rule violation, please contact Staff or use the /report command. Include evidence (screenshots/context).",
-        "5.4 No Mini-Modding": "Please do not attempt to enforce the rules yourself. Report the incident and let the Staff handle the situation."
     }
 }
 
