@@ -89,8 +89,6 @@ except ImportError:
     coll = None
     print("pymongo not installed; using local JSON fallback. Run: pip install pymongo")
 
-
-
 RULES_DATA = {
     "ARTICLE 1: Core Conduct": {
         "1.1 Respect Boundaries": "No harassment, unwanted DMs, or 'stalking' behaviors.",
@@ -120,7 +118,22 @@ RULES_DATA = {
         "4.4 Internal Privacy": "Staff-room discussions are strictly confidential. Sharing internal logs with members is a tier-1 offense.",
         "4.5 Staff Transparency": "Staff must clearly cite the rule violated when taking action. While staff aim to be patient and de-escalate, repeated defiance will result in immediate sanctions.",
         "4.6 No Power Tripping": "Avoid using staff-only permissions for jokes or to win arguments. This includes unnecessary nicknaming, muting for fun, or ghost-pinging."
+    },
+    "ARTICLE 5: Moderation & Sanctions": {
+        "5.1 Sanctions": "Violations may result in warnings, restrictions, removal, or permanent bans. We generally follow a Warning → Timeout → Kick → Ban progression, but staff may skip steps for severe violations.",
+        "5.2 Appeals": "If you believe a sanction was unfair, please contact an Admin via DM to discuss the situation calmly.",
+        "5.3 Reporting": "If you witness a rule violation, please contact Staff or use the /report command. Include evidence (screenshots/context).",
+        "5.4 No Mini-Modding": "Please do not attempt to enforce the rules yourself. Report the incident and let the Staff handle the situation."
     }
+}
+
+# --- SHOP & INVENTORY CONFIGURATION ---
+SHOP_ITEMS = {
+    "Custom Role Card": {"points": 50, "limit": 1},
+    "Deduct 10 Swear Count Card": {"points": 20, "limit": 10},
+    "Deduct 20 Swear Count Card": {"points": 40, "limit": 10},
+    "Clear Swear Count Card": {"points": 100, "limit": 10},
+    "Swear Count Transfer Card": {"points": 100, "limit": 1}
 }
 
 def is_owner(user_id: int):
@@ -205,33 +218,49 @@ async def change_status():
         await bot.change_presence(activity=discord.Game(name=msg))
         await asyncio.sleep(30) # Wait 30 seconds before switching to the next message
 
-@tasks.loop(seconds=30)
+# --- Updated Giveaway Task ---
+
+@tasks.loop(seconds=10)
 async def check_giveaways():
-    if giveaway_coll is None: return
-    
     now = datetime.now(timezone.utc)
-    expired = giveaway_coll.find({"active": True, "end_time": {"$lte": now}})
-    
-    for data in expired:
-        channel = bot.get_channel(data["channel_id"])
-        
-        # 1. Remove the button from the original message
+    # Find all giveaways that are NOT ended and whose end_time has passed
+    ended_giveaways = giveaway_coll.find({
+        "ended": False, 
+        "end_time": {"$lte": now.timestamp()}
+    })
+
+    for g in ended_giveaways:
+        channel = bot.get_channel(g["channel_id"])
+        if not channel:
+            continue
+
         try:
-            msg = await channel.fetch_message(data["message_id"])
-            # setting view=None removes the button forever
-            await msg.edit(view=None) 
-        except: pass
+            msg = await channel.fetch_message(g["_id"])
+            users = g.get("participants", [])
 
-        # 2. Pick Winners
-        entries = data.get("entries", [])
-        if not entries:
-            await channel.send(f"⚠️ Giveaway for **{data['title']}** ended with no entries.")
-        else:
-            winners = random.sample(entries, min(len(entries), data["winners"]))
-            mentions = ", ".join([f"<@{w}>" for w in winners])
-            await channel.send(f"🎊 **{data['title']}** Winners: {mentions}! (Total entries: {len(entries)})")
+            if len(users) < g["winners"]:
+                await channel.send(f"⚠️ Not enough participants for the giveaway: **{g['prize']}**")
+            else:
+                winners = random.sample(users, g["winners"])
+                winner_mentions = ", ".join([f"<@{w}>" for w in winners])
+                
+                embed = msg.embeds[0]
+                embed.color = discord.Color.red()
+                embed.description = f"**Giveaway Ended!**\n**Winners:** {winner_mentions}\n**Host:** <@{g['host_id']}>"
+                embed.set_footer(text="Ended at")
+                embed.timestamp = datetime.utcnow()
+                
+                await msg.edit(embed=embed, view=None)
+                await channel.send(f"🎊 Congratulations {winner_mentions}! You won **{g['prize']}**!")
 
-        giveaway_coll.update_one({"_id": data["_id"]}, {"$set": {"active": False}})
+            # Mark as ended in DB so it doesn't loop again
+            giveaway_coll.update_one({"_id": g["_id"]}, {"$set": {"ended": True}})
+            
+        except discord.NotFound:
+            # Message was deleted, just mark as ended to stop checking
+            giveaway_coll.update_one({"_id": g["_id"]}, {"$set": {"ended": True}})
+        except Exception as e:
+            print(f"Error ending giveaway {g['_id']}: {e}")
         
 @change_status.before_loop
 async def before_change_status():
@@ -466,7 +495,9 @@ class GiveawayView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
-    
+    if not check_giveaways.is_running():
+        check_giveaways.start()
+        
     if not change_status.is_running():
         change_status.start()
     
@@ -507,7 +538,79 @@ async def on_member_update(before, after):
     if before.premium_since is None and after.premium_since is not None:
         await send_boost_announcement(after)
         update_points(after.id, 50)
+# --- Costom Role UI ---
+class CustomRoleModal(discord.ui.Modal, title="Setup Your Custom Role"):
+    name = discord.ui.TextInput(label="Role Name", placeholder="V.I.P", min_length=2, max_length=32)
+    color = discord.ui.TextInput(label="Hex Color", placeholder="#ffffff", min_length=7, max_length=7)
 
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            hex_val = int(self.color.value.replace("#", ""), 16)
+            role = await interaction.guild.create_role(name=self.name.value, color=discord.Color(hex_val))
+            await interaction.user.add_roles(role)
+            
+            profile_coll.update_one({"_id": str(interaction.user.id)}, {"$inc": {"inventory.Custom Role Card": -1}})
+            await interaction.response.send_message(f"✅ Created and assigned role: **{self.name.value}**", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid Hex Color. Use format #FFFFFF", ephemeral=True)
+# --- Transfer Swear Count UI ---
+class TransferSwearModal(discord.ui.Modal, title="Swear Count Transfer"):
+    target_id = discord.ui.TextInput(label="Recipient User ID", placeholder="123456789...")
+    amount = discord.ui.TextInput(label="Amount to Transfer", placeholder="10")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amt = int(self.amount.value)
+            target_uid = str(self.target_id.value).strip()
+            uid = str(interaction.user.id)
+
+            user_counts = get_user_counts(interaction.user)
+            total_swears = sum(user_counts.values())
+
+            if total_swears < amt:
+                return await interaction.response.send_message(f"❌ You only have {total_swears} swears to transfer.", ephemeral=True)
+
+            # Deduct from sender and Add to receiver record
+            coll.update_one({"_id": uid}, {"$inc": {"counts.transferred_out": -amt}}, upsert=True)
+            coll.update_one({"_id": target_uid}, {"$inc": {"counts.transferred_in": amt}}, upsert=True)
+            
+            # Consume card
+            profile_coll.update_one({"_id": uid}, {"$inc": {"inventory.Swear Count Transfer Card": -1}})
+            
+            await interaction.response.send_message(f"✅ Transferred {amt} swear points to <@{target_uid}>!", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+
+# --- CONFIRMATION VIEW FOR POINTS TRANSFERS ---
+
+class SendConfirmView(discord.ui.View):
+    def __init__(self, sender, recipient, amount, fee):
+        super().__init__(timeout=30)
+        self.sender = sender
+        self.recipient = recipient
+        self.amount = amount
+        self.fee = fee
+
+    @discord.ui.button(label="Confirm Transfer", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.sender.id:
+            return await interaction.response.send_message("This isn't your transaction!", ephemeral=True)
+
+        total = self.amount + self.fee
+        # Re-check points just in case
+        user_data = profile_coll.find_one({"_id": str(self.sender.id)}) or {}
+        if user_data.get("points", 0) < total:
+            return await interaction.response.send_message("❌ You no longer have enough points.", ephemeral=True)
+
+        profile_coll.update_one({"_id": str(self.sender.id)}, {"$inc": {"points": -total}})
+        profile_coll.update_one({"_id": str(self.recipient.id)}, {"$inc": {"points": self.amount}}, upsert=True)
+
+        await interaction.response.edit_message(content=f"✅ **Transaction Complete!** Sent {self.amount} to {self.recipient.mention}. (Fee: {self.fee})", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="❌ Transaction cancelled.", view=None)
+ 
 # --- NEW: Invite Tracking Events ---
 
 @bot.event
@@ -1221,7 +1324,8 @@ async def giveaway_create(interaction: discord.Interaction, title: str, descript
         "active": True,
         "end_time": end_time,
         "channel_id": announce_channel.id,
-        "message_id": msg.id
+        "message_id": msg.id,
+        "ended": False
     })
     
     await interaction.response.send_message(f"✅ Started! ID: `{giveaway_id}`", ephemeral=True)
@@ -1333,6 +1437,91 @@ async def leavevc(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ I am not connected to any voice channel.", ephemeral=True)
         
+@tree.command(name="shop", description="Buy items from the shop")
+@app_commands.describe(item="Item to purchase", quantity="How many to buy")
+async def shop(interaction: discord.Interaction, item: str, quantity: int = 1):
+    if item not in SHOP_ITEMS:
+        return await interaction.response.send_message("❌ Item not found.", ephemeral=True)
+    
+    uid = str(interaction.user.id)
+    details = SHOP_ITEMS[item]
+    total_cost = details["points"] * quantity
+    
+    user_data = profile_coll.find_one({"_id": uid}) or {}
+    points = user_data.get("points", 0)
+    # Track global purchase history to enforce limits
+    purchased_so_far = user_data.get("purchase_limits", {}).get(item, 0)
+
+    if purchased_so_far + quantity > details["limit"]:
+        return await interaction.response.send_message(f"❌ Limit Reached! You can only buy/own a total of {details['limit']} of this item.", ephemeral=True)
+
+    if points < total_cost:
+        return await interaction.response.send_message(f"❌ You need {total_cost} points.", ephemeral=True)
+
+    profile_coll.update_one(
+        {"_id": uid},
+        {
+            "$inc": {
+                "points": -total_cost,
+                f"inventory.{item}": quantity,
+                f"purchase_limits.{item}": quantity
+            }
+        },
+        upsert=True
+    )
+    await interaction.response.send_message(f"🛒 You bought **{quantity}x {item}** for {total_cost} points!", ephemeral=True)
+
+@shop.autocomplete("item")
+async def shop_auto(interaction: discord.Interaction, current: str):
+    return [app_commands.Choice(name=i, value=i) for i in SHOP_ITEMS.keys() if current.lower() in i.lower()]
+
+@tree.command(name="usecard", description="Use a card from your inventory")
+async def usecard(interaction: discord.Interaction, item: str):
+    uid = str(interaction.user.id)
+    user_data = profile_coll.find_one({"_id": uid}) or {}
+    inv = user_data.get("inventory", {})
+
+    if inv.get(item, 0) <= 0:
+        return await interaction.response.send_message("❌ You don't own this card.", ephemeral=True)
+
+    if item == "Custom Role Card":
+        await interaction.response.send_modal(CustomRoleModal())
+    elif item == "Swear Count Transfer Card":
+        await interaction.response.send_modal(TransferSwearModal())
+    elif "Deduct" in item:
+        amt = 10 if "10" in item else 20
+        coll.update_one({"_id": uid}, {"$inc": {"counts.manual_deduction": -amt}}, upsert=True)
+        profile_coll.update_one({"_id": uid}, {"$inc": {f"inventory.{item}": -1}})
+        await interaction.response.send_message(f"📉 Deducted {amt} from your swear records!", ephemeral=True)
+    elif item == "Clear Swear Count Card":
+        coll.delete_one({"_id": uid})
+        profile_coll.update_one({"_id": uid}, {"$inc": {f"inventory.{item}": -1}})
+        await interaction.response.send_message("🧹 All swear counts cleared!", ephemeral=True)
+
+@usecard.autocomplete("item")
+async def inv_auto(interaction: discord.Interaction, current: str):
+    user_data = profile_coll.find_one({"_id": str(interaction.user.id)}) or {}
+    inv = user_data.get("inventory", {})
+    return [app_commands.Choice(name=f"{k} (x{v})", value=k) for k, v in inv.items() if v > 0 and current.lower() in k.lower()]
+
+@tree.command(name="sendpoints", description="Transfer points to a user (5 point fee)")
+async def sendpoints(interaction: discord.Interaction, user: discord.Member, count: int):
+    if user.id == interaction.user.id:
+        return await interaction.response.send_message("You can't send points to yourself.", ephemeral=True)
+    
+    fee = 5
+    total = count + fee
+    user_data = profile_coll.find_one({"_id": str(interaction.user.id)}) or {}
+    
+    if user_data.get("points", 0) < total:
+        return await interaction.response.send_message(f"❌ You need {total} points (Transfer: {count} + Fee: {fee}).", ephemeral=True)
+
+    view = SendConfirmView(interaction.user, user, count, fee)
+    await interaction.response.send_message(
+        f"❓ Are you sure you want to send **{count}** points to {user.mention}?\n"
+        f"A fee of **5 points** will be deducted from your balance (Total: {total}).",
+        view=view
+    )
 # ---------------- Message-based commands & scanning ----------------
 @bot.event
 async def on_message(message):
