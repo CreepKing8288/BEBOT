@@ -63,6 +63,22 @@ AUTHORIZED_ROLES = [
     1458455703638376469
 ]
 
+# --- ANTI-NUKE CONFIG ---
+NUKE_LIMIT = 3 
+NUKE_TIMEFRAME = 10 
+
+# IDs of bots and users to ignore (Carl-bot, Noctaly, OwO, Sapphire, etc.)
+WHITELISTED_IDS = [
+    235148962103951360,  # Carl-bot
+    581260551100203018,  # Noctaly
+    408785106942164992,  # OwO
+    589027434351755264,  # Sapphire
+    257247233290960896,  # VoiceMaster
+    # Add any other bot IDs or staff IDs here
+]
+
+warn_id = str(random.randint(100000, 999999))
+
 # --- Invite Tracker Cache ---
 invites_cache = {}
 
@@ -118,12 +134,6 @@ RULES_DATA = {
         "4.4 Internal Privacy": "Staff-room discussions are strictly confidential. Sharing internal logs with members is a tier-1 offense.",
         "4.5 Staff Transparency": "Staff must clearly cite the rule violated when taking action. While staff aim to be patient and de-escalate, repeated defiance will result in immediate sanctions.",
         "4.6 No Power Tripping": "Avoid using staff-only permissions for jokes or to win arguments. This includes unnecessary nicknaming, muting for fun, or ghost-pinging."
-    },
-    "ARTICLE 5: Moderation & Sanctions": {
-        "5.1 Sanctions": "Violations may result in warnings, restrictions, removal, or permanent bans. We generally follow a Warning → Timeout → Kick → Ban progression, but staff may skip steps for severe violations.",
-        "5.2 Appeals": "If you believe a sanction was unfair, please contact an Admin via DM to discuss the situation calmly.",
-        "5.3 Reporting": "If you witness a rule violation, please contact Staff or use the /report command. Include evidence (screenshots/context).",
-        "5.4 No Mini-Modding": "Please do not attempt to enforce the rules yourself. Report the incident and let the Staff handle the situation."
     }
 }
 
@@ -167,6 +177,7 @@ if 'db' in globals() and db is not None:
     giveaway_coll = db["giveaways"]
     # NEW: Tracker to prevent re-using referrals on rejoin
     ref_tracker_coll = db["ReferralTracker"] 
+    appeals_coll = db["appeals"] if db is not None else None
     
 else:
     profile_coll = None
@@ -336,142 +347,178 @@ def clear_user_data(user: discord.User, word: str = None):
 # Initialize at startup
 init_swear_words()
 # --- Classes ---
-# --- Appeal UI ---
-class AppealModal(discord.ui.Modal):
-    def __init__(self, warn_id, reason):
-        super().__init__(title=f"Appeal Warning: {warn_id}")
-        self.warn_id = warn_id
-        self.warn_reason = reason
+class AntiNukeTracker:
+    def __init__(self):
+        self.actions = {}
 
-    defense = discord.ui.TextInput(
-        label="Why should this warning be revoked?",
-        style=discord.TextStyle.paragraph,
-        placeholder="Explain your side of the story here...",
-        required=True,
-        max_length=1000
-    )
+    def is_nuking(self, user_id: int):
+        if user_id in WHITELISTED_IDS:
+            return False
+            
+        now = time.time()
+        if user_id not in self.actions:
+            self.actions[user_id] = []
+        
+        self.actions[user_id] = [t for t in self.actions[user_id] if now - t < NUKE_TIMEFRAME]
+        self.actions[user_id].append(now)
+        
+        return len(self.actions[user_id]) > NUKE_LIMIT
+
+nuke_tracker = AntiNukeTracker()
+
+async def quarantine_user(guild, member, reason):
+    """Times out a user for 28 days (maximum duration)."""
+    if member.id == guild.owner_id or member.id == bot.user.id or member.id in WHITELISTED_IDS:
+        return 
+
+    try:
+        # Timeout for 28 days
+        duration = timedelta(days=28)
+        await member.timeout(duration, reason=f"[ANTI-NUKE] {reason}")
+        
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            embed = discord.Embed(
+                title="🚨 ANTI-NUKE TRIGGERED",
+                description=f"**User:** {member.mention}\n**Action:** Timed out for 28 days\n**Reason:** {reason}",
+                color=discord.Color.dark_red(),
+                timestamp=datetime.utcnow()
+            )
+            await log_channel.send(embed=embed)
+    except Exception as e:
+        print(f"Anti-nuke failed to timeout {member.id}: {e}")
+
+# --- Appeal UI ---
+class AppealModal(discord.ui.Modal, title="Appeal Warning"):
+    user_explanation = discord.ui.TextInput(label="Your Explanation", style=discord.TextStyle.paragraph)
+
+    def __init__(self, warn_id, section, staff_note, staff_id):
+        super().__init__()
+        self.warn_id = warn_id
+        self.section = section
+        self.staff_note = staff_note
+        self.staff_id = staff_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Locate the staff log channel
-        channel = interaction.client.get_channel(WARN_LOG_CHANNEL_ID)
+        # --- Save EVERYTHING to MongoDB Appeals Collection ---
+        appeal_data = {
+            "warn_id": self.warn_id,
+            "user_id": interaction.user.id,
+            "user_name": str(interaction.user),
+            "staff_id": self.staff_id,
+            "section": self.section,
+            "staff_note": self.staff_note,
+            "appeal_reason": self.user_explanation.value,
+            "status": "pending",
+            "timestamp": datetime.utcnow()
+        }
         
-        if not channel:
-            await interaction.response.send_message("❌ Error: Appeal channel not found.", ephemeral=True)
-            return
+        if appeals_coll is not None:
+            appeals_coll.insert_one(appeal_data)
 
-        embed = discord.Embed(
-            title="⚖️ New Warning Appeal",
-            description=f"**User:** {interaction.user.mention} (`{interaction.user.id}`)\n**Warning ID:** `{self.warn_id}`",
-            color=0x9B59B6,
-            timestamp=datetime.utcnow()
-        )
-        embed.add_field(name="Original Reason", value=self.warn_reason, inline=True)
-        embed.add_field(name="User's Defense", value=self.defense.value, inline=False)
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        # Send info to Staff Appeal Log Channel
+        staff_channel = bot.get_channel(WARN_LOG_CHANNEL_ID)
+        if staff_channel:
+            embed = discord.Embed(title="⚖️ New Warning Appeal", color=discord.Color.orange())
+            embed.add_field(name="Warning ID", value=f"`{self.warn_id}`", inline=True)
+            embed.add_field(name="Rule Section", value=self.section, inline=True)
+            embed.add_field(name="Original Staff Note", value=f"```{self.staff_note}```", inline=False)
+            embed.add_field(name="User's Explanation", value=f"```{self.user_explanation.value}```", inline=False)
+            
+            await staff_channel.send(embed=embed, view=AppealActionView(warn_id=self.warn_id))
 
-        # IMPORTANT: This attaches the Approve/Reject buttons to the STAFF message
-        view = AppealActionView(self.warn_id, interaction.user)
-        await channel.send(embed=embed, view=view)
-        
-        await interaction.response.send_message("✅ Your appeal has been submitted to the staff team.", ephemeral=True)
-
+        await interaction.response.send_message("✅ Your appeal has been submitted to staff.", ephemeral=True)
+               
 class AppealView(discord.ui.View):
-    def __init__(self, warn_id, reason):
-        super().__init__(timeout=None) # Button doesn't expire
-        self.warn_id = warn_id
-        self.warn_reason = reason
-
-    @discord.ui.button(label="👮 Appeal Warning", style=discord.ButtonStyle.secondary, emoji="⚖️")
-    async def appeal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Open the modal when button is clicked
-        await interaction.response.send_modal(AppealModal(self.warn_id, self.warn_reason))
-
-class AppealActionView(discord.ui.View):
-    def __init__(self, warn_id, target_user: discord.Member):
+    def __init__(self, warn_id=None, section=None, staff_id=None, staff_note=None):
         super().__init__(timeout=None)
         self.warn_id = warn_id
-        self.target_user = target_user
+        self.section = section
+        self.staff_id = staff_id
+        self.staff_note = staff_note
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
+    @discord.ui.button(
+        label="👮 Appeal Warning", 
+        style=discord.ButtonStyle.secondary, 
+        emoji="⚖️", 
+        custom_id="persistent_appeal_init_btn"
+    )
+    async def appeal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # If the bot restarted, variables are None. Let's pull them from the DM content.
+        w_id = self.warn_id
+        w_section = self.section
+        w_note = self.staff_note
+        
+        if w_id is None:
+            try:
+                content = interaction.message.content
+                # Use regex to find the ID and Note in the DM text
+                w_id = re.search(r"Warning ID:\s*(\w+)", content).group(1)
+                w_section = re.search(r"Rule:\s*(.*)", content).group(1).split('\n')[0]
+                # Pull the note from between the asterisks
+                w_note = re.search(r"Note:\s*(.*)", content).group(1).replace('*', '').strip()
+            except Exception as e:
+                print(f"Recovery error: {e}")
+                return await interaction.response.send_message("❌ Error: Appeal data lost. Please contact staff.", ephemeral=True)
+
+        modal = AppealModal(w_id, w_section, w_note, self.staff_id)
+        await interaction.response.send_modal(modal)
+
+class AppealActionView(discord.ui.View):
+    def __init__(self, warn_id=None):
+        super().__init__(timeout=None)
+        self.warn_id = warn_id
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅", custom_id="persistent_approve_btn")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Use the AUTHORIZED_ROLES list defined at the top of your bot.py
-        if not any(role.id in AUTHORIZED_ROLES for role in interaction.user.roles):
-            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-            return
+        # Fetch from DB
+        data = appeals_coll.find_one({"warn_id": self.warn_id})
+        if not data:
+            return await interaction.response.send_message("❌ Error: Appeal data not found in database.", ephemeral=True)
 
-        # 1. Remove warning from MongoDB
-        if profile_coll is not None:
-            profile_coll.update_one(
-                {"_id": str(self.target_user.id)}, 
-                {"$pull": {"warnings": {"warn_id": self.warn_id}}, "$inc": {"warn_count": -1}}
-            )
+        user_id = data["user_id"]
+        
+        # Remove warning from user profile
+        profile_coll.update_one(
+            {"_id": str(user_id)},
+            {"$pull": {"warnings": {"warn_id": self.warn_id}}, "$inc": {"warn_count": -1}}
+        )
+        
+        # Mark as resolved in DB
+        appeals_coll.delete_one({"_id": data["_id"]})
 
-        # 2. Notify the User (Approved)
-        try:
-            await self.target_user.send(f"✅ Your appeal for warning **{self.warn_id}** has been **APPROVED**. The warning has been removed from your record.")
-        except discord.Forbidden:
-            pass 
-
-        # 3. Update the log message and REMOVE the buttons
+        # Update the staff message
         embed = interaction.message.embeds[0]
         embed.color = discord.Color.green()
-        embed.add_field(name="Status", value=f"✅ Approved by {interaction.user.mention}", inline=False)
-        
-        # Setting view=None here deletes the buttons from the message
+        embed.title = "✅ Appeal Approved"
         await interaction.message.edit(embed=embed, view=None)
-        await interaction.response.send_message(f"Successfully revoked warning {self.warn_id}.", ephemeral=True)
+        await interaction.response.send_message(f"Successfully revoked warning `{self.warn_id}`.", ephemeral=True)
 
-    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌")
+    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌", custom_id="persistent_reject_btn")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Permission Check
-        if not any(role.id in AUTHORIZED_ROLES for role in interaction.user.roles):
-            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-            return
-
-        # 1. Notify the User (Rejected)
-        try:
-            await self.target_user.send(f"❌ Your appeal for warning **{self.warn_id}** has been **REJECTED**. This decision is final.")
-        except discord.Forbidden:
-            pass
-
-        # 2. Update the log message and REMOVE the buttons
+        appeals_coll.delete_one({"warn_id": self.warn_id})
+        
         embed = interaction.message.embeds[0]
         embed.color = discord.Color.red()
-        embed.add_field(name="Status", value=f"❌ Rejected by {interaction.user.mention}", inline=False)
-        
-        # Setting view=None here deletes the buttons from the message
+        embed.title = "❌ Appeal Rejected"
         await interaction.message.edit(embed=embed, view=None)
-        await interaction.response.send_message(f"Rejected appeal for {self.warn_id}.", ephemeral=True)
-
-    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌")
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Permission Check
-        if not any(role.id in [1458454264702832792, 1458455202892877988, 1458490049413906553, 1458456130195034251, 1458455703638376469] for role in interaction.user.roles):
-            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-            return
-
-        # 1. Notify the User (Rejected)
-        try:
-            await self.target_user.send(f"❌ Your appeal for warning **{self.warn_id}** has been **REJECTED**. This decision is final.")
-        except discord.Forbidden:
-            pass
-
-        # 2. Update the log message
-        embed = interaction.message.embeds[0]
-        embed.color = discord.Color.red()
-        embed.add_field(name="Status", value=f"❌ Rejected by {interaction.user.mention}", inline=False)
-        
-        await interaction.message.edit(embed=embed, view=None)
-        await interaction.response.send_message(f"Rejected appeal for {self.warn_id}.", ephemeral=True)
+        await interaction.response.send_message("Appeal has been rejected.", ephemeral=True)
 
 # --- Giveaway UI ---
 class GiveawayView(discord.ui.View):
-    def __init__(self, giveaway_id):
+    def __init__(self, giveaway_id=None):
         super().__init__(timeout=None)
         self.giveaway_id = giveaway_id
 
     @discord.ui.button(label="Enter Giveaway", style=discord.ButtonStyle.primary, emoji="🎉", custom_id="enter_giveaway")
-    async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def enter_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g_id = self.giveaway_id
+        if g_id is None:
+            try:
+                footer_text = interaction.message.embeds[0].footer.text
+                g_id = footer_text.replace("ID: ", "")
+            except:
+                return await interaction.response.send_message("❌ Could not find Giveaway ID. Contact staff.", ephemeral=True)
         if giveaway_coll is None: return
         
         data = giveaway_coll.find_one_and_update(
@@ -495,28 +542,28 @@ class GiveawayView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
+    
+    bot.add_view(GiveawayView())
+    bot.add_view(AppealView())
+    bot.add_view(AppealActionView())
+    print("Persistent views registered.")
+    
     if not check_giveaways.is_running():
         check_giveaways.start()
         
     if not change_status.is_running():
         change_status.start()
     
-    # --- NEW: Cache existing invites on startup ---
     print("Caching invites...")
     for guild in bot.guilds:
         try:
             invs = await guild.invites()
             invites_cache[guild.id] = {invite.code: invite.uses for invite in invs}
-            print(f"Cached {len(invs)} invites for {guild.name}")
-        except Exception as e:
-            print(f"Could not cache invites for {guild.name}: {e}")
+        except: pass
 
-    print('------')
-    # Sync slash commands with Discord and log registration status
     try:
         synced = await tree.sync()
-        names = [c.name for c in synced]
-        print(f"Synced {len(synced)} slash command(s): {', '.join(names) if names else 'none'}")
+        print(f"Synced {len(synced)} slash command(s)")
     except Exception as e:
         print("Failed to sync slash commands:", e)
 
@@ -610,9 +657,10 @@ class SendConfirmView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="❌ Transaction cancelled.", view=None)
- 
-# --- NEW: Invite Tracking Events ---
 
+
+
+# --- Events ---
 @bot.event
 async def on_invite_create(invite):
     """Updates cache when a new invite is created."""
@@ -668,6 +716,41 @@ async def on_member_join(member):
         if inviter:
             embed.set_footer(text="Verified Referral: +1 Point awarded")
         await log_channel.send(embed=embed)
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    async for entry in channel.guild.audit_logs(action=discord.AuditLogAction.channel_delete, limit=1):
+        if nuke_tracker.is_nuking(entry.user.id):
+            member = channel.guild.get_member(entry.user.id)
+            if member:
+                await quarantine_user(channel.guild, member, "Mass Channel Deletion")
+
+@bot.event
+async def on_guild_role_delete(role):
+    async for entry in role.guild.audit_logs(action=discord.AuditLogAction.role_delete, limit=1):
+        if nuke_tracker.is_nuking(entry.user.id):
+            member = role.guild.get_member(entry.user.id)
+            if member:
+                await quarantine_user(role.guild, member, "Mass Role Deletion")
+
+@bot.event
+async def on_member_remove(member):
+    # Detects Kicks
+    async for entry in member.guild.audit_logs(action=discord.AuditLogAction.kick, limit=1):
+        if entry.target.id == member.id:
+            if nuke_tracker.is_nuking(entry.user.id):
+                staff = member.guild.get_member(entry.user.id)
+                if staff:
+                    await quarantine_user(member.guild, staff, "Mass Member Kick")
+
+@bot.event
+async def on_member_ban(guild, user_target):
+    # Detects Bans
+    async for entry in guild.audit_logs(action=discord.AuditLogAction.ban, limit=1):
+        if nuke_tracker.is_nuking(entry.user.id):
+            staff = guild.get_member(entry.user.id)
+            if staff:
+                await quarantine_user(guild, staff, "Mass Member Ban")
 
 # ---------------- User Data Helpers ----------------
 def get_user_data(user_id: int):
@@ -1178,24 +1261,28 @@ async def rulewarning(interaction: discord.Interaction, user: discord.Member, ar
                 await user.timeout(timeout_duration, reason=f"Reached {current_warns} warnings.")
             except Exception as e:
                 penalty_text += f" (Failed: {e})"
+                
+            
 
-        # Send DM with Appeal Button
         dm_text = f"⚠️ **Warning Issued**\n**Rule:** {section}\n{rule_desc}\n\n*Note: {staff_msg}*\n**Warning ID:** {warn_id}"
         if timeout_duration:
             dm_text += f"\n\n**Penalty:** You have been timed out for {penalty_text}."
         
         try:
-            # THIS IS THE CHANGED PART: We attach the AppealView here
-            view = AppealView(warn_id, section)
+            view = AppealView(
+            warn_id=warn_id, 
+            section=section, 
+            staff_id=interaction.user.id, 
+            staff_note=staff_msg
+            )
             await user.send(dm_text, view=view)
         except discord.Forbidden:
-            # If user has DMs off, we can't send the button
-            pass
+                pass
         except Exception as e:
             print(f"Failed to send DM: {e}")
 
         # Send LOG
-        await send_warn_log("Warning Issued", interaction.user, user, reason=section, warn_id=warn_id, extra=f"Total Warnings: {current_warns}\nPenalty: {penalty_text}")
+        await send_warn_log("Warning Issued", interaction.user, user, reason=section, warn_id=warn_id, extra=f"Total Warnings: {current_warns}\nPenalty: {penalty_text}\nStaff Message: {staff_msg}")
         
         await interaction.followup.send(f"✅ Warning **{warn_id}** recorded. (Total: {current_warns})", ephemeral=True)
 
