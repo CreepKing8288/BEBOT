@@ -1,3 +1,5 @@
+from email.mime import message
+
 import discord
 import os
 import json
@@ -60,8 +62,7 @@ AUTHORIZED_ROLES = [
     1458455202892877988, 
     1458490049413906553, 
     1458456130195034251, 
-    1458455703638376469,
-    1471348293379428405
+    1458455703638376469
 ]
 
 # --- ANTI-NUKE CONFIG ---
@@ -83,6 +84,8 @@ warn_id = str(random.randint(100000, 999999))
 # --- Invite Tracker Cache ---
 invites_cache = {}
 
+# --- Dayoff System Config ---
+dayoff_staff = {}
 # --- Swear tracking config ---
 # MongoDB connection (set MONGODB_URI environment variable)
 MONGO_URI = os.getenv("MONGODB_URI")
@@ -1184,7 +1187,22 @@ async def clearcount(interaction: discord.Interaction, user: discord.Member, wor
             f"🧹 Cleared **all** swear records for {user.mention}.", 
             ephemeral=False
         )
-
+@tree.command(name="dayoff", description="Set your status to 'On Dayoff' (Staff Only)")
+@app_commands.describe(reason="Why are you taking a day off?", days="How many days will you be away?")
+async def dayoff(interaction: discord.Interaction, reason: str, days: str):
+    # Check if the user is staff using your existing has_permission function
+    if not has_permission(interaction.user):
+        return await interaction.response.send_message("❌ This command is for staff members only.", ephemeral=True)
+    
+    dayoff_staff[interaction.user.id] = {"reason": reason, "days": days}
+        
+    embed = discord.Embed(
+        title="🌴 Dayoff Set",
+        description=f"{interaction.user.mention}, your dayoff has been recorded.\n**Reason:** {reason}\n**Duration:** {days}",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed)
+    
 async def send_warn_log(action, staff, user, reason=None, warn_id=None, extra=None):
     """Sends a formatted embed to the warning logs channel."""
     channel = bot.get_channel(WARN_LOG_CHANNEL_ID)
@@ -1610,6 +1628,9 @@ async def sendpoints(interaction: discord.Interaction, user: discord.Member, cou
         f"A fee of **5 points** will be deducted from your balance (Total: {total}).",
         view=view
     )
+    
+    
+   
 # ---------------- Message-based commands & scanning ----------------
 @bot.event
 async def on_message(message):
@@ -1711,7 +1732,18 @@ async def on_message(message):
             await message.channel.send("No swear words tracked.")
             return
         await message.channel.send("Tracked words: " + ", ".join(words))
+        
+    if message.author.id in dayoff_staff:
+        del dayoff_staff[message.author.id]
+        await message.channel.send(f"👋 Welcome back {message.author.mention}! Your dayoff status has been turned off.", delete_after=5)
 
+            # --- 2. Mention Detection for Dayoff ---
+    if message.mentions:
+        for mentioned_user in message.mentions:
+            if mentioned_user.id in dayoff_staff:
+                data = dayoff_staff[mentioned_user.id]
+                response = f"ℹ️ **{mentioned_user.display_name}** is on dayoff\n**Reason:** {data['reason']}\n**Days of Dayoff:** {data['days']}"
+            await message.channel.send(response)
 @bot.event
 async def on_message_delete(message):
     if message.author.bot:
@@ -1821,4 +1853,6 @@ async def on_voice_state_update(member, before, after):
 
     await channel.send(embed=embed)
 
+    
+        
 bot.run(hUIPJ21boH)
