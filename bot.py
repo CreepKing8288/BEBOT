@@ -1737,13 +1737,17 @@ async def on_message(message):
         del dayoff_staff[message.author.id]
         await message.channel.send(f"👋 Welcome back {message.author.mention}! Your dayoff status has been turned off.", delete_after=5)
 
+# Initialize response to None so it always exists
+    response = None
             # --- 2. Mention Detection for Dayoff ---
     if message.mentions:
         for mentioned_user in message.mentions:
             if mentioned_user.id in dayoff_staff:
                 data = dayoff_staff[mentioned_user.id]
                 response = f"ℹ️ **{mentioned_user.display_name}** is on dayoff\n**Reason:** {data['reason']}\n**Days of Dayoff:** {data['days']}"
-            await message.channel.send(response)
+
+    if response:
+        await message.channel.send(response)
 @bot.event
 async def on_message_delete(message):
     if message.author.bot:
